@@ -1,24 +1,19 @@
 import React, { useState } from "react";
 import {
-  http,
-  createConfig,
-  WagmiConfig,
-  useAccount,
-  useConnect,
-  useDisconnect,
-  useReadContract,
-  useWriteContract,
-  useSwitchChain,
+  http, createConfig, WagmiConfig,
+  useAccount, useConnect, useDisconnect,
+  useReadContract, useWriteContract, useSwitchChain,
 } from "wagmi";
 import { injected } from "wagmi/connectors";
 import { defineChain } from "viem";
 
-// ===== Chain (Monad testnet) =====
+// Safe reads of envs (show UI even if пусто)
 const CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 const RPC_URL = String(import.meta.env.VITE_RPC_URL ?? "https://testnet-rpc.monad.xyz");
-const NFT_ADDRESS = String(import.meta.env.VITE_NFT_ADDRESS ?? "") as `0x${string}`;
+const NFT_ADDRESS_RAW = (import.meta.env.VITE_NFT_ADDRESS ?? "") as string;
+const NFT_ADDRESS = (NFT_ADDRESS_RAW.startsWith("0x") ? NFT_ADDRESS_RAW : "") as `0x${string}`;
 
-const MONAD_TESTNET = defineChain({
+const MONAD = defineChain({
   id: CHAIN_ID,
   name: "Monad Testnet",
   nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
@@ -26,16 +21,18 @@ const MONAD_TESTNET = defineChain({
 });
 
 const config = createConfig({
-  chains: [MONAD_TESTNET],
+  chains: [MONAD],
   connectors: [injected()],
-  transports: { [MONAD_TESTNET.id]: http(RPC_URL) },
+  transports: { [MONAD.id]: http(RPC_URL) },
 });
 
-// ===== Minimal ERC-721 ABI =====
 const ERC721_ABI = [
-  { type: "function", name: "balanceOf", stateMutability: "view", inputs: [{ name: "owner", type: "address" }], outputs: [{ type: "uint256" }] },
-  { type: "function", name: "ownerOf", stateMutability: "view", inputs: [{ name: "tokenId", type: "uint256" }], outputs: [{ type: "address" }] },
-  { type: "function", name: "burn", stateMutability: "nonpayable", inputs: [{ name: "tokenId", type: "uint256" }], outputs: [] },
+  { type: "function", name: "balanceOf", stateMutability: "view",
+    inputs: [{ name: "owner", type: "address" }], outputs: [{ type: "uint256" }] },
+  { type: "function", name: "ownerOf", stateMutability: "view",
+    inputs: [{ name: "tokenId", type: "uint256" }], outputs: [{ type: "address" }] },
+  { type: "function", name: "burn", stateMutability: "nonpayable",
+    inputs: [{ name: "tokenId", type: "uint256" }], outputs: [] },
 ] as const;
 
 function AppInner() {
@@ -47,8 +44,9 @@ function AppInner() {
   const [hasAccess, setHasAccess] = useState<null | boolean>(null);
   const [tokenIdToBurn, setTokenIdToBurn] = useState("");
 
+  const canQuery = Boolean(NFT_ADDRESS);
   const { refetch: refetchBalance, isFetching } = useReadContract({
-    address: NFT_ADDRESS,
+    address: (NFT_ADDRESS || "0x0000000000000000000000000000000000000000") as `0x${string}`,
     abi: ERC721_ABI,
     functionName: "balanceOf",
     args: [address ?? "0x0000000000000000000000000000000000000000"],
@@ -59,16 +57,18 @@ function AppInner() {
 
   const onConnect = async () => {
     await connect({ connector: connectors.find(c => c.id === "injected") || connectors[0] });
-    try { await switchChain({ chainId: MONAD_TESTNET.id }); } catch {}
+    try { await switchChain({ chainId: MONAD.id }); } catch {}
   };
 
   const onCheckAccess = async () => {
+    if (!canQuery) return alert("Set VITE_NFT_ADDRESS in Environment Variables.");
     const res = await refetchBalance();
     const v = res.data ? BigInt(res.data as any) : 0n;
     setHasAccess(v > 0n);
   };
 
   const onBurn = async () => {
+    if (!canQuery) return alert("Set VITE_NFT_ADDRESS first.");
     if (!tokenIdToBurn) return alert("Enter tokenId");
     try {
       await writeContractAsync({
@@ -76,10 +76,11 @@ function AppInner() {
         abi: ERC721_ABI,
         functionName: "burn",
         args: [BigInt(tokenIdToBurn)],
-        chainId: MONAD_TESTNET.id,
+        chainId: MONAD.id,
       });
-      alert("Burn tx sent. After confirm, press Check Access again.");
+      alert("Burn tx sent. After confirm, press Check Access.");
     } catch (e: any) {
+      console.error(e);
       alert(e?.shortMessage || e?.message || "Burn failed");
     }
   };
@@ -103,7 +104,9 @@ function AppInner() {
 
       <div style={{ marginTop: 24, background: "#111", padding: 16, borderRadius: 16, maxWidth: 560 }}>
         <h2 style={{ marginTop: 0 }}>Token Gate</h2>
-        <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>Collection: {NFT_ADDRESS || "(set VITE_NFT_ADDRESS)"}</div>
+        <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>
+          Collection: {NFT_ADDRESS || "(set VITE_NFT_ADDRESS in Vercel → Environment Variables)"}
+        </div>
         <button onClick={onCheckAccess} disabled={!isConnected || isFetching} style={{ padding: "10px 14px", borderRadius: 12, background: "#222" }}>
           {isFetching ? "Checking…" : "Check Access"}
         </button>
@@ -125,9 +128,6 @@ function AppInner() {
         <button onClick={onBurn} disabled={!isConnected || writeStatus === "pending"} style={{ padding: "10px 14px", borderRadius: 12, background: "#222" }}>
           {writeStatus === "pending" ? "Sending…" : "Burn"}
         </button>
-        <div style={{ marginTop: 8, fontSize: 12, opacity: 0.6 }}>
-          If your NFT contract lacks burn(tokenId), we’ll switch to safeTransferFrom → 0x…dEaD.
-        </div>
       </div>
     </div>
   );
