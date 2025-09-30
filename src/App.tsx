@@ -14,28 +14,15 @@ import { injected } from "wagmi/connectors";
 import { defineChain } from "viem";
 
 // ===== Chain (Monad testnet) =====
-const CHAIN_ID = Number(
-  (import.meta as any).env?.VITE_CHAIN_ID ??
-    (globalThis as any).process?.env?.NEXT_PUBLIC_CHAIN_ID ??
-    10143
-);
-
-const RPC_URL =
-  (import.meta as any).env?.VITE_RPC_URL ??
-  (globalThis as any).process?.env?.NEXT_PUBLIC_RPC_URL ??
-  "https://testnet-rpc.monad.xyz";
-
-const NFT_ADDRESS = (
-  (import.meta as any).env?.VITE_NFT_ADDRESS ??
-  (globalThis as any).process?.env?.NEXT_PUBLIC_NFT_ADDRESS ??
-  ""
-) as `0x${string}`;
+const CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
+const RPC_URL = String(import.meta.env.VITE_RPC_URL ?? "https://testnet-rpc.monad.xyz");
+const NFT_ADDRESS = String(import.meta.env.VITE_NFT_ADDRESS ?? "") as `0x${string}`;
 
 const MONAD_TESTNET = defineChain({
   id: CHAIN_ID,
   name: "Monad Testnet",
   nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
-  rpcUrls: { default: { http: [String(RPC_URL)] } },
+  rpcUrls: { default: { http: [RPC_URL] } },
 });
 
 const config = createConfig({
@@ -46,29 +33,9 @@ const config = createConfig({
 
 // ===== Minimal ERC-721 ABI =====
 const ERC721_ABI = [
-  {
-    type: "function",
-    name: "balanceOf",
-    stateMutability: "view",
-    inputs: [{ name: "owner", type: "address" }],
-    outputs: [{ name: "", type: "uint256" }],
-  },
-  {
-    type: "function",
-    name: "ownerOf",
-    stateMutability: "view",
-    inputs: [{ name: "tokenId", type: "uint256" }],
-    outputs: [{ name: "", type: "address" }],
-  },
-  {
-    type: "function",
-    name: "burn",
-    stateMutability: "nonpayable",
-    inputs: [{ name: "tokenId", type: "uint256" }],
-    outputs: [],
-  },
-  // If your collection doesn't support burn(tokenId), swap to safeTransferFrom(from, to, tokenId) → 0x...dEaD
-  // { "type":"function","name":"safeTransferFrom","stateMutability":"nonpayable","inputs":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"tokenId","type":"uint256"}],"outputs":[] }
+  { type: "function", name: "balanceOf", stateMutability: "view", inputs: [{ name: "owner", type: "address" }], outputs: [{ type: "uint256" }] },
+  { type: "function", name: "ownerOf", stateMutability: "view", inputs: [{ name: "tokenId", type: "uint256" }], outputs: [{ type: "address" }] },
+  { type: "function", name: "burn", stateMutability: "nonpayable", inputs: [{ name: "tokenId", type: "uint256" }], outputs: [] },
 ] as const;
 
 function AppInner() {
@@ -76,6 +43,7 @@ function AppInner() {
   const { connect, connectors } = useConnect();
   const { disconnect } = useDisconnect();
   const { switchChain } = useSwitchChain();
+
   const [hasAccess, setHasAccess] = useState<null | boolean>(null);
   const [tokenIdToBurn, setTokenIdToBurn] = useState("");
 
@@ -90,10 +58,8 @@ function AppInner() {
   const { writeContractAsync, status: writeStatus } = useWriteContract();
 
   const onConnect = async () => {
-    await connect({ connector: connectors.find((c) => c.id === "injected") || connectors[0] });
-    try {
-      await switchChain({ chainId: MONAD_TESTNET.id });
-    } catch {}
+    await connect({ connector: connectors.find(c => c.id === "injected") || connectors[0] });
+    try { await switchChain({ chainId: MONAD_TESTNET.id }); } catch {}
   };
 
   const onCheckAccess = async () => {
@@ -137,14 +103,13 @@ function AppInner() {
 
       <div style={{ marginTop: 24, background: "#111", padding: 16, borderRadius: 16, maxWidth: 560 }}>
         <h2 style={{ marginTop: 0 }}>Token Gate</h2>
-        <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>Collection: {NFT_ADDRESS}</div>
+        <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>Collection: {NFT_ADDRESS || "(set VITE_NFT_ADDRESS)"}</div>
         <button onClick={onCheckAccess} disabled={!isConnected || isFetching} style={{ padding: "10px 14px", borderRadius: 12, background: "#222" }}>
           {isFetching ? "Checking…" : "Check Access"}
         </button>
         {hasAccess !== null && (
           <div style={{ marginTop: 10, fontSize: 14 }}>
-            Access:{" "}
-            {hasAccess ? <span style={{ color: "#47e774" }}>granted</span> : <span style={{ color: "#ff5c5c" }}>denied</span>}
+            Access: {hasAccess ? <span style={{ color: "#47e774" }}>granted</span> : <span style={{ color: "#ff5c5c" }}>denied</span>}
           </div>
         )}
       </div>
@@ -161,7 +126,7 @@ function AppInner() {
           {writeStatus === "pending" ? "Sending…" : "Burn"}
         </button>
         <div style={{ marginTop: 8, fontSize: 12, opacity: 0.6 }}>
-          If burn(tokenId) isn’t available, switch to safeTransferFrom(from, 0x000000000000000000000000000000000000dEaD, tokenId).
+          If your NFT contract lacks burn(tokenId), we’ll switch to safeTransferFrom → 0x…dEaD.
         </div>
       </div>
     </div>
