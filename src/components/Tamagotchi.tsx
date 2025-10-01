@@ -49,7 +49,6 @@ export default function Tamagotchi() {
         <span className="pill">{state.pet.toUpperCase()}</span>
       </div>
 
-      {/* Stage */}
       <div style={{
         display: "grid", gridTemplateColumns: "160px 1fr", gap: 16, alignItems: "center"
       }}>
@@ -61,7 +60,6 @@ export default function Tamagotchi() {
           <Sprite frames={frames} fps={config.fps ?? 8} loop={state.pet !== "dead"} />
         </div>
 
-        {/* Stats */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           {stat("Hunger", state.needs.hunger)}
           {stat("Hygiene", state.needs.hygiene)}
@@ -74,7 +72,6 @@ export default function Tamagotchi() {
         </div>
       </div>
 
-      {/* Actions */}
       {state.pet !== "dead" ? (
         <div className="mt-3" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
           <button className="btn" onClick={() => dispatch({ type: "DO", do: "feed" })}>🍗 Feed</button>
