@@ -57,9 +57,9 @@ const ERC1155_ABI = [
     outputs: [] },
 ] as const;
 
-/* ===== Local persistence ===== */
+/* ===== Local persistence (lives & cache) ===== */
 const LIVES_KEY = "wg_lives_v1";
-const LASTID_KEY = "wg_last_token_v1"; // { "<chain>:<addr>:<contract>:<std>": tokenId }
+const LASTID_KEY = "wg_last_token_v1";
 
 const livesKey = (cid:number, addr:string)=>`${cid}:${addr.toLowerCase()}`;
 const lastIdKey = (cid:number, addr:string, contract:string, std:"ERC721"|"ERC1155") =>
@@ -116,7 +116,6 @@ export default function VaultPanel() {
 
   useEffect(() => { if (address) setLives(getLives(MONAD_CHAIN_ID, address)); }, [address]);
 
-  // detect standard on Monad once
   useEffect(() => {
     (async () => {
       try {
@@ -231,10 +230,7 @@ export default function VaultPanel() {
     } catch { return null; }
   }
 
-  /* ---------- Auto-pick with cache ---------- */
-
   async function pickAnyErc721(user: `0x${string}`): Promise<bigint | null> {
-    // cached id (instant)
     const cached = getCachedId(MONAD_CHAIN_ID, user, ALLOWED_CONTRACT, "ERC721");
     if (cached !== null) {
       const owner = await ownerOfSafe(Number(cached));
@@ -248,7 +244,6 @@ export default function VaultPanel() {
 
     let probes = 0;
 
-    // small ids
     {
       const batches = chunkify(0, SMALL_FIRST_RANGE);
       for (let b = 0; b < batches.length; b++) {
@@ -260,7 +255,6 @@ export default function VaultPanel() {
       }
     }
 
-    // descending from totalSupply/guess
     const topGuess = (await readTotalSupplyGuess()) ?? DEFAULT_TOP_GUESS;
     {
       const batches = chunkify(topGuess - 1, Math.max(0, topGuess - MAX_ERC721_PROBES), -1);
@@ -285,7 +279,6 @@ export default function VaultPanel() {
 
     let probes = 0;
 
-    // small ids
     {
       const batches = chunkify(0, SMALL_FIRST_RANGE);
       for (let b = 0; b < batches.length; b++) {
@@ -297,7 +290,6 @@ export default function VaultPanel() {
       }
     }
 
-    // exponential hints
     const hints: number[] = []; for (let v = 128; v <= 65536; v *= 2) hints.push(v);
     {
       const batches: number[][] = [];
@@ -316,7 +308,7 @@ export default function VaultPanel() {
     return null;
   }
 
-  /* ---------- Main actions (receipt + lives + cache) ---------- */
+  /* ---------- Main actions (receipt + lives + cache + event) ---------- */
 
   async function sendOne() {
     if (!isConnected || VAULT === zeroAddress || !address) return;
@@ -344,6 +336,7 @@ export default function VaultPanel() {
             setCachedId(MONAD_CHAIN_ID, address, ALLOWED_CONTRACT, "ERC721", id);
             const total = addLives(MONAD_CHAIN_ID, address, 1);
             setLives(total);
+            window.dispatchEvent(new Event('wg:lives-changed')); // notify App gate
             append(`+1 life (total: ${total})`);
           } else {
             append("❌ Tx reverted — life not granted.");
@@ -370,6 +363,7 @@ export default function VaultPanel() {
           setCachedId(MONAD_CHAIN_ID, address, ALLOWED_CONTRACT, "ERC1155", id1155);
           const total = addLives(MONAD_CHAIN_ID, address, 1);
           setLives(total);
+          window.dispatchEvent(new Event('wg:lives-changed'));
           append(`+1 life (total: ${total})`);
         } else {
           append("❌ Tx reverted — life not granted.");
@@ -410,7 +404,9 @@ export default function VaultPanel() {
         if (r.status === "success") {
           setCachedId(MONAD_CHAIN_ID, address, ALLOWED_CONTRACT, "ERC1155", id);
           const total = addLives(MONAD_CHAIN_ID, address, 1);
-          setLives(total); append(`+1 life (total: ${total})`);
+          setLives(total);
+          window.dispatchEvent(new Event('wg:lives-changed'));
+          append(`+1 life (total: ${total})`);
         } else append("❌ Tx reverted — life not granted.");
       } else {
         const tx = await writeContract(cfg, {
@@ -426,7 +422,9 @@ export default function VaultPanel() {
         if (r.status === "success") {
           setCachedId(MONAD_CHAIN_ID, address, ALLOWED_CONTRACT, "ERC721", id);
           const total = addLives(MONAD_CHAIN_ID, address, 1);
-          setLives(total); append(`+1 life (total: ${total})`);
+          setLives(total);
+          window.dispatchEvent(new Event('wg:lives-changed'));
+          append(`+1 life (total: ${total})`);
         } else append("❌ Tx reverted — life not granted.");
       }
     } catch (e:any) {
@@ -478,19 +476,9 @@ export default function VaultPanel() {
         <pre>{log || "—"}</pre>
       </div>
 
-      {/* Hearts + numeric fallback */}
-      <div className="mt-2">
-        <div className="hearts">
-          {Array.from({ length: Math.max(3, Math.min(5, lives || 0)) }).map((_, i) => (
-            <div key={i} className={`heart ${i < (lives || 0) ? "pop" : "off"}`}>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M12 21s-7.5-4.35-9.33-8.23C1.4 10.3 2.2 7.6 4.7 6.6c1.85-.75 3.7-.18 4.8 1.18C10.5 6.42 12.35 5.85 14.2 6.6c2.5 1 3.3 3.7 2.03 6.17C19.5 16.65 12 21 12 21z"/>
-              </svg>
-            </div>
-          ))}
-        </div>
+      <div className="mt-1 text-sm">
+        Lives: <span className="font-semibold">{lives}</span>
       </div>
-      <div className="mt-1 text-sm">Lives: <span className="font-semibold">{lives}</span></div>
     </div>
   );
 }
