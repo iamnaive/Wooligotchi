@@ -3,7 +3,6 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-console.log("[WoollyGotchi] boot");
 const queryClient = new QueryClient();
 
 const el = document.getElementById("root");
