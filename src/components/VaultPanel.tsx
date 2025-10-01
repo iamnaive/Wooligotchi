@@ -1,5 +1,5 @@
 // src/components/VaultPanel.tsx
-// Auto-pick ANY owned token (deep chunk scan to genesis) and send 1 unit to VAULT.
+// Auto-pick ANY owned token on Monad (reads/logs always on MONAD_CHAIN_ID) and send 1 unit to VAULT.
 // Direct writeContract (no simulate). Manual ID fallback kept.
 // Comments in English only.
 
@@ -7,26 +7,17 @@
 
 import { useEffect, useState } from "react";
 import { zeroAddress } from "viem";
-import {
-  useAccount,
-  useChainId,
-  useConfig,
-  useSwitchChain,
-} from "wagmi";
-import {
-  getPublicClient,
-  readContract,
-  writeContract,
-} from "@wagmi/core";
+import { useAccount, useConfig, useSwitchChain } from "wagmi";
+import { getPublicClient, readContract, writeContract } from "@wagmi/core";
 
 /* ===== ENV / CONSTS ===== */
 const MONAD_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 const ALLOWED_CONTRACT = "0x88c78d5852f45935324c6d100052958f694e8446";
 const VAULT = (import.meta.env.VITE_VAULT_ADDRESS as string) || zeroAddress;
 
-// Deep scan settings (small chunks, many steps; safe for weak RPCs)
-const CHUNK = 40_000n;        // blocks per query
-const MAX_STEPS = 500;        // up to 2e7 blocks max (adjust if needed)
+// Deep scan settings (small chunks; many steps to genesis if needed)
+const CHUNK = 40_000n;
+const MAX_STEPS = 500;
 
 /* ===== ABIs ===== */
 const ERC165_ABI = [
@@ -96,7 +87,7 @@ const ERC1155_TRANSFER_BATCH = {
   ],
 } as const;
 
-/* ===== Local store ===== */
+/* ===== Local lives store ===== */
 const LKEY = "wg_lives_v1";
 const lKey = (cid:number, addr:string)=>`${cid}:${addr.toLowerCase()}`;
 const getLives = (cid:number, addr?:string|null) => {
@@ -119,56 +110,55 @@ type Std = "ERC721" | "ERC1155" | "UNKNOWN";
 export default function VaultPanel() {
   const cfg = useConfig();
   const { address, isConnected } = useAccount();
-  const chainId = useChainId();
   const { switchChain } = useSwitchChain();
 
   const [std, setStd] = useState<Std>("UNKNOWN");
   const [log, setLog] = useState("");
   const [busy, setBusy] = useState(false);
-  const [lives, setLives] = useState(() => getLives(chainId ?? 0, address));
+  const [lives, setLives] = useState(() => getLives(MONAD_CHAIN_ID, address));
   const [advanced, setAdvanced] = useState(false);
   const [manualId, setManualId] = useState("");
 
   function append(s: string) { setLog((p) => (p ? p + "\n" : "") + s); }
 
-  // Detect standard
+  // Always detect standard ON MONAD
   useEffect(() => {
     (async () => {
       try {
         setStd("UNKNOWN"); setLog("");
-        append("Detecting token standard via ERC-165...");
+        append("Detecting token standard on Monad…");
         const is721 = await readContract(cfg, {
-          abi: ERC165_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-          functionName: "supportsInterface", args: [IFACE_ERC721 as `0x${string}`],
+          abi: ERC165_ABI,
+          address: ALLOWED_CONTRACT as `0x${string}`,
+          functionName: "supportsInterface",
+          args: [IFACE_ERC721 as `0x${string}`],
+          chainId: MONAD_CHAIN_ID,
         });
         if (is721) { setStd("ERC721"); append("✓ Detected ERC-721"); return; }
         const is1155 = await readContract(cfg, {
-          abi: ERC165_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-          functionName: "supportsInterface", args: [IFACE_ERC1155 as `0x${string}`],
+          abi: ERC165_ABI,
+          address: ALLOWED_CONTRACT as `0x${string}`,
+          functionName: "supportsInterface",
+          args: [IFACE_ERC1155 as `0x${string}`],
+          chainId: MONAD_CHAIN_ID,
         });
         if (is1155) { setStd("ERC1155"); append("✓ Detected ERC-1155"); return; }
         append("⚠️ Unknown standard; fallback will try both.");
       } catch {
-        append("ℹ️ ERC-165 detection failed; fallback enabled.");
+        append("ℹ️ Standard detection failed (RPC).");
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chainId]);
+  }, [MONAD_CHAIN_ID]);
 
   async function ensureMonad() {
-    try {
-      if (chainId !== MONAD_CHAIN_ID) {
-        await switchChain({ chainId: MONAD_CHAIN_ID });
-      }
-    } catch (e) {
-      append("⚠️ Could not switch/add Monad testnet. MetaMask/OKX/Rabby recommended; Phantom may not support custom testnets.");
-      throw e;
-    }
+    // Try to switch; Phantom может проигнорить — это ок, просто покажем подсказку
+    try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {}
   }
 
   const canSend = isConnected && VAULT !== zeroAddress;
 
-  /* ---------- Deep chunk scan utilities ---------- */
+  /* ---------- Deep chunk scan ON MONAD ---------- */
 
   async function* windows(pc: ReturnType<typeof getPublicClient>) {
     let to = await pc.getBlockNumber();
@@ -181,53 +171,54 @@ export default function VaultPanel() {
   }
 
   async function pickAnyErc721(user: `0x${string}`): Promise<bigint | null> {
-    // Try enumerable first (cheap)
+    // Enumerable shortcut
     try {
       const enumerable = await readContract(cfg, {
-        abi: ERC165_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "supportsInterface", args: [IFACE_ERC721_ENUM as `0x${string}`],
+        abi: ERC165_ABI,
+        address: ALLOWED_CONTRACT as `0x${string}`,
+        functionName: "supportsInterface",
+        args: [IFACE_ERC721_ENUM as `0x${string}`],
+        chainId: MONAD_CHAIN_ID,
       });
       if (enumerable) {
-        const bal = (await readContract(cfg, {
+        const bal = await readContract(cfg, {
           abi: ERC721_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-          functionName: "balanceOf", args: [user],
-        })) as bigint;
+          functionName: "balanceOf", args: [user], chainId: MONAD_CHAIN_ID,
+        }) as bigint;
         if (bal > 0n) {
-          const id0 = (await readContract(cfg, {
+          const id0 = await readContract(cfg, {
             abi: ERC721_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-            functionName: "tokenOfOwnerByIndex", args: [user, 0n],
-          })) as bigint;
+            functionName: "tokenOfOwnerByIndex", args: [user, 0n], chainId: MONAD_CHAIN_ID,
+          }) as bigint;
           return id0;
         }
       }
     } catch {}
 
-    // Deep scan logs (small chunks, many steps)
+    // Logs scan (Monad only)
     try {
       const pc = getPublicClient(cfg, { chainId: MONAD_CHAIN_ID });
-      let scanned = 0;
+      let i = 0;
       for await (const w of windows(pc)) {
-        scanned++;
-        append(`Scanning 721 logs window ${scanned}…`);
+        i++; append(`Scanning 721 window ${i}…`);
         const logs = await pc.getLogs({
           address: ALLOWED_CONTRACT as `0x${string}`,
           event: ERC721_TRANSFER_EVT as any,
           args: { to: user },
           fromBlock: w.fromBlock, toBlock: w.toBlock,
         });
-        // reverse for newest first
-        for (let i = logs.length - 1; i >= 0; i--) {
-          const id = logs[i].args?.tokenId as bigint;
+        for (let k = logs.length - 1; k >= 0; k--) {
+          const id = logs[k].args?.tokenId as bigint;
           try {
-            const owner = (await readContract(cfg, {
+            const owner = await readContract(cfg, {
               abi: ERC721_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-              functionName: "ownerOf", args: [id],
-            })) as `0x${string}`;
+              functionName: "ownerOf", args: [id], chainId: MONAD_CHAIN_ID,
+            }) as `0x${string}`;
             if (owner.toLowerCase() === user.toLowerCase()) return id;
           } catch {}
         }
       }
-    } catch (e) {
+    } catch {
       append("RPC 721 scan failed.");
     }
     return null;
@@ -236,10 +227,9 @@ export default function VaultPanel() {
   async function pickAnyErc1155(user: `0x${string}`): Promise<bigint | null> {
     try {
       const pc = getPublicClient(cfg, { chainId: MONAD_CHAIN_ID });
-      let scanned = 0;
+      let i = 0;
       for await (const w of windows(pc)) {
-        scanned++;
-        append(`Scanning 1155 logs window ${scanned}…`);
+        i++; append(`Scanning 1155 window ${i}…`);
 
         const logsSingle = await pc.getLogs({
           address: ALLOWED_CONTRACT as `0x${string}`,
@@ -247,12 +237,12 @@ export default function VaultPanel() {
           args: { to: user },
           fromBlock: w.fromBlock, toBlock: w.toBlock,
         });
-        for (let i = logsSingle.length - 1; i >= 0; i--) {
-          const id = logsSingle[i].args?.id as bigint;
-          const bal = (await readContract(cfg, {
+        for (let k = logsSingle.length - 1; k >= 0; k--) {
+          const id = logsSingle[k].args?.id as bigint;
+          const bal = await readContract(cfg, {
             abi: ERC1155_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-            functionName: "balanceOf", args: [user, id],
-          })) as bigint;
+            functionName: "balanceOf", args: [user, id], chainId: MONAD_CHAIN_ID,
+          }) as bigint;
           if (bal > 0n) return id;
         }
 
@@ -262,14 +252,14 @@ export default function VaultPanel() {
           args: { to: user },
           fromBlock: w.fromBlock, toBlock: w.toBlock,
         });
-        for (let i = logsBatch.length - 1; i >= 0; i--) {
-          const ids = logsBatch[i].args?.ids as bigint[];
+        for (let k = logsBatch.length - 1; k >= 0; k--) {
+          const ids = logsBatch[k].args?.ids as bigint[];
           for (let j = ids.length - 1; j >= 0; j--) {
             const id = ids[j];
-            const bal = (await readContract(cfg, {
+            const bal = await readContract(cfg, {
               abi: ERC1155_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-              functionName: "balanceOf", args: [user, id],
-            })) as bigint;
+              functionName: "balanceOf", args: [user, id], chainId: MONAD_CHAIN_ID,
+            }) as bigint;
             if (bal > 0n) return id;
           }
         }
@@ -287,7 +277,7 @@ export default function VaultPanel() {
     setBusy(true); setLog("");
 
     try {
-      await ensureMonad();
+      await ensureMonad(); // try switch; Phantom may ignore — that’s fine
 
       // 721 first (or unknown)
       if (std === "ERC721" || std === "UNKNOWN") {
@@ -303,9 +293,9 @@ export default function VaultPanel() {
             chainId: MONAD_CHAIN_ID,
           });
           append(`✅ Tx sent: ${tx}`);
-          const total = addLives(MONAD_CHAIN_ID, address, 1); setLives(total);
+          const total = addLives(MONAD_CHAIN_ID, address, 1); 
           append(`+1 life (total: ${total})`);
-          setBusy(false); return;
+          return;
         }
       }
 
@@ -322,18 +312,18 @@ export default function VaultPanel() {
           chainId: MONAD_CHAIN_ID,
         });
         append(`✅ Tx sent: ${tx2}`);
-        const total2 = addLives(MONAD_CHAIN_ID, address, 1); setLives(total2);
+        const total2 = addLives(MONAD_CHAIN_ID, address, 1);
         append(`+1 life (total: ${total2})`);
-        setBusy(false); return;
+        return;
       }
 
-      append("❌ Auto-pick couldn't find a token. Use Advanced → Send by ID.");
-    } catch (e: any) {
+      append("❌ Auto-pick couldn't find a token on Monad. Use Advanced → Send by ID.");
+    } catch (e:any) {
       console.error(e);
       const m = e?.shortMessage || e?.message || "write failed";
       if (/user rejected/i.test(m)) append("❌ Rejected in wallet.");
       else if (/insufficient funds/i.test(m)) append("❌ Not enough MON for gas.");
-      else if (/chain/i.test(m)) append("❌ Wrong chain; try MetaMask/OKX/Rabby — Phantom may not support custom testnets.");
+      else if (/chain/i.test(m)) append("❌ Wallet chain mismatch. MetaMask/OKX/Rabby recommended; Phantom may ignore chain switch.");
       else append(`❌ ${m}`);
     } finally {
       setBusy(false);
@@ -365,8 +355,7 @@ export default function VaultPanel() {
         });
         append(`✅ Sent 721 #${id}: ${tx}`);
       }
-
-      const total = addLives(MONAD_CHAIN_ID, address, 1); setLives(total);
+      const total = addLives(MONAD_CHAIN_ID, address, 1);
       append(`+1 life (total: ${total})`);
     } catch (e:any) {
       console.error(e);
@@ -381,17 +370,6 @@ export default function VaultPanel() {
       </div>
       <div className="mb-2 text-sm text-zinc-400">
         Allowed: <span className="font-mono">{ALLOWED_CONTRACT}</span>
-      </div>
-      <div className="mb-3 text-sm">
-        Network: {chainId}{" "}
-        {chainId !== MONAD_CHAIN_ID && (
-          <button
-            className="ml-2 rounded border border-zinc-700 px-2 py-1 text-xs"
-            onClick={async () => { try { await ensureMonad(); } catch {} }}
-          >
-            Switch to Monad
-          </button>
-        )}
       </div>
 
       <div className="mb-3 text-lg font-semibold">Send 1 NFT to Vault → get 1 life</div>
