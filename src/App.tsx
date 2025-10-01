@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import {
   http,
   createConfig,
-  WagmiProvider,         // ✅ use WagmiProvider in wagmi v2
+  WagmiProvider,            // wagmi v2
   useAccount,
   useConnect,
   useDisconnect,
@@ -10,16 +10,17 @@ import {
   useWriteContract,
   useSwitchChain,
 } from "wagmi";
-import { injected } from "wagmi/connectors";
+import { injected, walletConnect, coinbaseWallet } from "wagmi/connectors";
 import { defineChain } from "viem";
 
-// -------- Env (с безопасными дефолтами) --------
+// -------- Env --------
 const CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 const RPC_URL = String(import.meta.env.VITE_RPC_URL ?? "https://testnet-rpc.monad.xyz");
 const NFT_ADDRESS_RAW = (import.meta.env.VITE_NFT_ADDRESS ?? "") as string;
 const NFT_ADDRESS = (NFT_ADDRESS_RAW.startsWith("0x") ? NFT_ADDRESS_RAW : "") as `0x${string}`;
+const WC_ID = String(import.meta.env.VITE_WALLETCONNECT_PROJECT_ID ?? "");
 
-// -------- Monad testnet chain --------
+// -------- Chain (Monad testnet) --------
 const MONAD_TESTNET = defineChain({
   id: CHAIN_ID,
   name: "Monad Testnet",
@@ -27,14 +28,32 @@ const MONAD_TESTNET = defineChain({
   rpcUrls: { default: { http: [RPC_URL] } },
 });
 
-// Wagmi config
+// -------- Connectors --------
+const connectorsList = [
+  injected(),
+  WC_ID
+    ? walletConnect({
+        projectId: WC_ID,
+        showQrModal: true, // откроет QR-окно Reown
+        metadata: {
+          name: "WoollyGotchi",
+          description: "Tamagotchi mini-app on Monad testnet",
+          url: typeof window !== "undefined" ? window.location.origin : "https://example.com",
+          icons: ["https://raw.githubusercontent.com/twitter/twemoji/master/assets/svg/1f999.svg"]
+        }
+      })
+    : null,
+  coinbaseWallet({ appName: "WoollyGotchi" }),
+].filter(Boolean);
+
+// -------- wagmi config --------
 const config = createConfig({
   chains: [MONAD_TESTNET],
-  connectors: [injected()],
+  connectors: connectorsList as any,
   transports: { [MONAD_TESTNET.id]: http(RPC_URL) },
 });
 
-// Minimal ERC-721 ABI
+// -------- Minimal ERC-721 ABI --------
 const ERC721_ABI = [
   { type: "function", name: "balanceOf", stateMutability: "view",
     inputs: [{ name: "owner", type: "address" }], outputs: [{ type: "uint256" }] },
@@ -46,7 +65,7 @@ const ERC721_ABI = [
 
 function AppInner() {
   const { address, isConnected } = useAccount();
-  const { connect, connectors } = useConnect();
+  const { connect, connectors, status: connectStatus } = useConnect();
   const { disconnect } = useDisconnect();
   const { switchChain } = useSwitchChain();
 
@@ -63,8 +82,9 @@ function AppInner() {
 
   const { writeContractAsync, status: writeStatus } = useWriteContract();
 
-  const onConnect = async () => {
-    await connect({ connector: connectors.find(c => c.id === "injected") || connectors[0] });
+  const onConnect = async (connectorId?: string) => {
+    const c = connectorId ? connectors.find(x => x.id === connectorId) : connectors[0];
+    await connect({ connector: c! });
     try { await switchChain({ chainId: MONAD_TESTNET.id }); } catch {}
   };
 
@@ -98,9 +118,23 @@ function AppInner() {
       <h1 style={{ fontSize: 28, fontWeight: 700 }}>WoollyGotchi (Monad testnet)</h1>
 
       {!isConnected ? (
-        <button onClick={onConnect} style={{ padding: "10px 14px", borderRadius: 14, background: "#222", marginTop: 12 }}>
-          Connect Wallet
-        </button>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+          {connectors.map((c) => (
+            <button
+              key={c.id}
+              onClick={() => onConnect(c.id)}
+              disabled={!c.ready || connectStatus === "pending"}
+              style={{ padding: "10px 14px", borderRadius: 14, background: "#222" }}
+            >
+              {c.name === "Injected" ? "MetaMask / Browser" : c.name}
+            </button>
+          ))}
+          {!WC_ID && (
+            <div style={{ fontSize: 12, opacity: 0.6 }}>
+              (Set VITE_WALLETCONNECT_PROJECT_ID to enable WalletConnect QR)
+            </div>
+          )}
+        </div>
       ) : (
         <div style={{ marginTop: 12 }}>
           <div style={{ opacity: 0.8, fontSize: 12, marginBottom: 8 }}>{address}</div>
