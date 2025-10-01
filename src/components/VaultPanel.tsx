@@ -5,6 +5,11 @@ import { zeroAddress } from "viem";
 import { useAccount, useConfig, useSwitchChain } from "wagmi";
 import { readContract, writeContract, getPublicClient } from "@wagmi/core";
 
+/** Component props */
+export default function VaultPanel({ mode = "full" }: { mode?: "full" | "cta" }) {
+  return <VaultPanelInner mode={mode} />;
+}
+
 /* ===== ENV / CONSTS ===== */
 const MONAD_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 const ALLOWED_CONTRACT = "0x88c78d5852f45935324c6d100052958f694e8446";
@@ -24,7 +29,7 @@ const ERC165_ABI = [
     inputs: [{ name: "interfaceId", type: "bytes4" }], outputs: [{ type: "bool" }] },
 ] as const;
 const IFACE_ERC721      = "0x80ac58cd";
-const IFACE_ERC1155     = "0xd9b67a26";
+const IFACE_ERC1155     = "0xD9B67A26";
 const IFACE_ERC721_ENUM = "0x780e9d63";
 
 const ERC721_READ_ABI = [
@@ -95,10 +100,10 @@ const setCachedId = (cid:number, addr:string, contract:string, std:"ERC721"|"ERC
   localStorage.setItem(LASTID_KEY, JSON.stringify(map));
 };
 
-/* ===== Component ===== */
+/* ===== Inner component (logic) ===== */
 type Std = "ERC721" | "ERC1155" | "UNKNOWN";
 
-export default function VaultPanel() {
+function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
   const cfg = useConfig();
   const { address, isConnected } = useAccount();
   const { switchChain } = useSwitchChain();
@@ -107,9 +112,8 @@ export default function VaultPanel() {
   const [log, setLog] = useState("");
   const [busy, setBusy] = useState(false);
   const [lives, setLives] = useState(() => getLives(MONAD_CHAIN_ID, address));
-  const [advanced, setAdvanced] = useState(false);
   const [manualId, setManualId] = useState("");
-  const [mode, setMode] = useState<"balanced"|"fast">("balanced");
+  const [modeScan, setModeScan] = useState<"balanced"|"fast">("balanced");
 
   function append(s: string) { setLog((p) => (p ? p + "\n" : "") + s); }
   const canSend = isConnected && VAULT !== zeroAddress;
@@ -119,7 +123,7 @@ export default function VaultPanel() {
   useEffect(() => {
     (async () => {
       try {
-        setStd("UNKNOWN"); setLog("");
+        setStd("UNKNOWN");
         append("Detecting token standard on Monad…");
         const is721 = await readContract(cfg, {
           abi: ERC165_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
@@ -134,16 +138,12 @@ export default function VaultPanel() {
         });
         if (is1155) { setStd("ERC1155"); append("✓ ERC-1155"); return; }
         append("⚠️ Unknown; will try both.");
-      } catch {
-        append("ℹ️ Standard detection failed; fallback enabled.");
-      }
+      } catch { append("ℹ️ Standard detection failed; fallback enabled."); }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function ensureMonad() {
-    try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {}
-  }
+  async function ensureMonad() { try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {} }
 
   /* ---------- Utils ---------- */
   const sleep = (ms:number)=>new Promise(r=>setTimeout(r,ms));
@@ -251,7 +251,7 @@ export default function VaultPanel() {
         probes += batches[b].length;
         if (hit !== null) return hit;
         if (b % YIELD_EVERY === 0) await sleep(0);
-        if (probes >= MAX_ERC721_PROBES || mode === "fast") break;
+        if (probes >= MAX_ERC721_PROBES || modeScan === "fast") break;
       }
     }
 
@@ -286,7 +286,7 @@ export default function VaultPanel() {
         probes += batches[b].length;
         if (hit !== null) return hit;
         if (b % YIELD_EVERY === 0) await sleep(0);
-        if (probes >= MAX_ERC1155_PROBES || mode === "fast") break;
+        if (probes >= MAX_ERC1155_PROBES || modeScan === "fast") break;
       }
     }
 
@@ -308,8 +308,7 @@ export default function VaultPanel() {
     return null;
   }
 
-  /* ---------- Main actions (receipt + lives + cache + event) ---------- */
-
+  /* ---------- Send & grant life ---------- */
   async function sendOne() {
     if (!isConnected || VAULT === zeroAddress || !address) return;
     setBusy(true); setLog("");
@@ -320,7 +319,6 @@ export default function VaultPanel() {
       if (std === "ERC721" || std === "UNKNOWN") {
         const id = await pickAnyErc721(address as `0x${string}`);
         if (id !== null) {
-          append(`Sending ERC-721 #${id} → VAULT...`);
           const txHash = await writeContract(cfg, {
             abi: ERC721_WRITE_ABI,
             address: ALLOWED_CONTRACT as `0x${string}`,
@@ -328,26 +326,21 @@ export default function VaultPanel() {
             args: [address, VAULT as `0x${string}`, id],
             account: address, chainId: MONAD_CHAIN_ID,
           });
-          append(`✅ Tx sent: ${txHash}`);
-
           const pc = getPublicClient(cfg, { chainId: MONAD_CHAIN_ID });
           const receipt = await pc.waitForTransactionReceipt({ hash: txHash });
           if (receipt.status === "success") {
             setCachedId(MONAD_CHAIN_ID, address, ALLOWED_CONTRACT, "ERC721", id);
             const total = addLives(MONAD_CHAIN_ID, address, 1);
             setLives(total);
-            window.dispatchEvent(new Event('wg:lives-changed')); // notify App gate
-            append(`+1 life (total: ${total})`);
-          } else {
-            append("❌ Tx reverted — life not granted.");
+            window.dispatchEvent(new Event('wg:lives-changed'));
           }
+          setBusy(false);
           return;
         }
       }
 
       const id1155 = await pickAnyErc1155(address as `0x${string}`);
       if (id1155 !== null) {
-        append(`Sending ERC-1155 id=${id1155} x1 → VAULT...`);
         const txHash = await writeContract(cfg, {
           abi: ERC1155_ABI,
           address: ALLOWED_CONTRACT as `0x${string}`,
@@ -355,8 +348,6 @@ export default function VaultPanel() {
           args: [address, VAULT as `0x${string}`, id1155, 1n, "0x"],
           account: address, chainId: MONAD_CHAIN_ID,
         });
-        append(`✅ Tx sent: ${txHash}`);
-
         const pc = getPublicClient(cfg, { chainId: MONAD_CHAIN_ID });
         const receipt = await pc.waitForTransactionReceipt({ hash: txHash });
         if (receipt.status === "success") {
@@ -364,78 +355,37 @@ export default function VaultPanel() {
           const total = addLives(MONAD_CHAIN_ID, address, 1);
           setLives(total);
           window.dispatchEvent(new Event('wg:lives-changed'));
-          append(`+1 life (total: ${total})`);
-        } else {
-          append("❌ Tx reverted — life not granted.");
         }
+        setBusy(false);
         return;
       }
 
-      append("❌ Auto-pick couldn't find a token. Use Advanced → Send by ID.");
+      setLog("No owned NFT found in allowed collection.");
     } catch (e:any) {
       console.error(e);
-      const m = e?.shortMessage || e?.message || "write failed";
-      if (/user rejected/i.test(m)) append("❌ Rejected in wallet.");
-      else if (/insufficient funds/i.test(m)) append("❌ Not enough MON for gas.");
-      else if (/chain/i.test(m)) append("❌ Wallet chain mismatch.");
-      else append(`❌ ${m}`);
-    } finally {
+      setLog(e?.shortMessage || e?.message || "send failed");
       setBusy(false);
     }
   }
 
-  async function sendManual() {
-    if (!address || !manualId) return;
-    try {
-      await ensureMonad();
-      const id = BigInt(manualId);
+  /* ---------- UI ---------- */
 
-      if (std === "ERC1155") {
-        const tx = await writeContract(cfg, {
-          abi: ERC1155_ABI,
-          address: ALLOWED_CONTRACT as `0x${string}`,
-          functionName: "safeTransferFrom",
-          args: [address, VAULT as `0x${string}`, id, 1n, "0x"],
-          account: address, chainId: MONAD_CHAIN_ID,
-        });
-        append(`✅ Sent 1155 id=${id}: ${tx}`);
-        const pc = getPublicClient(cfg, { chainId: MONAD_CHAIN_ID });
-        const r = await pc.waitForTransactionReceipt({ hash: tx });
-        if (r.status === "success") {
-          setCachedId(MONAD_CHAIN_ID, address, ALLOWED_CONTRACT, "ERC1155", id);
-          const total = addLives(MONAD_CHAIN_ID, address, 1);
-          setLives(total);
-          window.dispatchEvent(new Event('wg:lives-changed'));
-          append(`+1 life (total: ${total})`);
-        } else append("❌ Tx reverted — life not granted.");
-      } else {
-        const tx = await writeContract(cfg, {
-          abi: ERC721_WRITE_ABI,
-          address: ALLOWED_CONTRACT as `0x${string}`,
-          functionName: "safeTransferFrom",
-          args: [address, VAULT as `0x${string}`, id],
-          account: address, chainId: MONAD_CHAIN_ID,
-        });
-        append(`✅ Sent 721 #${id}: ${tx}`);
-        const pc = getPublicClient(cfg, { chainId: MONAD_CHAIN_ID });
-        const r = await pc.waitForTransactionReceipt({ hash: tx });
-        if (r.status === "success") {
-          setCachedId(MONAD_CHAIN_ID, address, ALLOWED_CONTRACT, "ERC721", id);
-          const total = addLives(MONAD_CHAIN_ID, address, 1);
-          setLives(total);
-          window.dispatchEvent(new Event('wg:lives-changed'));
-          append(`+1 life (total: ${total})`);
-        } else append("❌ Tx reverted — life not granted.");
-      }
-    } catch (e:any) {
-      console.error(e);
-      append(`❌ ${e?.shortMessage || e?.message || "manual write failed"}`);
-    }
+  if (mode === "cta") {
+    // Single centered CTA for the splash gate
+    return (
+      <div style={{ display:"grid", placeItems:"center", marginTop:8 }}>
+        <button className="btn btn-primary btn-lg" onClick={sendOne} disabled={!canSend || busy}>
+          {busy ? "Sending…" : "1 NFT = 1 life"}
+        </button>
+        <div className="helper" style={{ marginTop:10 }}>
+          Sends one NFT from <span className="pill">{ALLOWED_CONTRACT.slice(0,6)}…{ALLOWED_CONTRACT.slice(-4)}</span> to the vault.
+        </div>
+        {log && <div className="log" style={{marginTop:12}}><pre>{log}</pre></div>}
+      </div>
+    );
   }
 
-  /* ---------- UI ---------- */
-  const modeLabel = useMemo(() => mode === "fast" ? "Fast (fewer probes)" : "Balanced (wider search)", [mode]);
-
+  // Full panel (not used on splash by default, but available)
   return (
     <div className="mx-auto mt-6 max-w-3xl rounded-2xl card">
       <div className="mb-2 text-sm muted">
@@ -445,40 +395,23 @@ export default function VaultPanel() {
         Allowed: <span className="font-mono">{ALLOWED_CONTRACT}</span>
       </div>
 
-      <div className="mb-2 flex items-center gap-3 text-xs muted">
+      <div className="mb-2 text-xs muted" style={{display:"flex", gap:8, alignItems:"center"}}>
         <span>Scan mode:</span>
-        <button className={`btn ${mode==="balanced"?"":"ghost"}`} onClick={()=>setMode("balanced")}>Balanced</button>
-        <button className={`btn ${mode==="fast"?"":"ghost"}`} onClick={()=>setMode("fast")}>Fast</button>
-        <span className="opacity-70">{modeLabel}</span>
+        <button className={`btn ${modeScan==="balanced"?"":"btn-ghost"}`} onClick={()=>setModeScan("balanced")}>Balanced</button>
+        <button className={`btn ${modeScan==="fast"?"":"btn-ghost"}`} onClick={()=>setModeScan("fast")}>Fast</button>
       </div>
 
       <div className="mb-3 text-lg card-title">Send 1 NFT to Vault → get 1 life</div>
-
       <button className="btn btn-primary" disabled={!canSend || busy} onClick={sendOne}>
-        {busy ? "Searching & sending…" : "Send 1 NFT to Vault"}
+        {busy ? "Sending…" : "Send automatically"}
       </button>
-
-      <div className="mt-3">
-        <button className="text-xs underline helper" onClick={() => setAdvanced(v => !v)}>
-          {advanced ? "Hide" : "Advanced"} (manual id)
-        </button>
-        {advanced && (
-          <div className="mt-2" style={{display:"flex", gap:8, alignItems:"center"}}>
-            <input className="input" style={{maxWidth:220}} placeholder="tokenId / id"
-              value={manualId} onChange={(e)=>setManualId(e.target.value)} />
-            <button className="btn" onClick={sendManual} disabled={!canSend || !manualId}>Send by ID</button>
-          </div>
-        )}
-      </div>
 
       <div className="mt-3 log">
         <div className="mb-1" style={{fontWeight:600}}>Log</div>
         <pre>{log || "—"}</pre>
       </div>
 
-      <div className="mt-1 text-sm">
-        Lives: <span className="font-semibold">{lives}</span>
-      </div>
+      <div className="mt-1 text-sm">Lives: <span className="font-semibold">{lives}</span></div>
     </div>
   );
 }
