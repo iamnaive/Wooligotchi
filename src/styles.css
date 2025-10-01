@@ -1,0 +1,121 @@
+/* ---------- Design tokens ---------- */
+:root {
+  --bg: #06070d;
+  --card: #0c0f18;
+  --card-2: #0f1320;
+  --text: #f3f5ff;
+  --muted: #b3b8d4;
+  --accent: #7c4dff;         /* primary accent */
+  --accent-2: #4dd2ff;       /* secondary accent */
+  --ring: rgba(124, 77, 255, 0.55);
+  --shadow: 0 8px 30px rgba(0, 0, 0, 0.55);
+  --radius: 16px;
+}
+
+/* ---------- Global ---------- */
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(1000px 600px at 10% -10%, rgba(124,77,255,0.12), transparent 60%),
+    radial-gradient(900px 540px at 90% -10%, rgba(77,210,255,0.12), transparent 60%),
+    var(--bg);
+}
+
+/* ---------- Layout ---------- */
+.container {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 32px 20px 64px;
+}
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.title {
+  font-size: clamp(26px, 3vw, 36px);
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+/* ---------- Card ---------- */
+.card {
+  background: linear-gradient(180deg, var(--card), var(--card-2));
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius);
+  padding: 20px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(6px);
+}
+.card + .card { margin-top: 16px; }
+.card-title {
+  margin: 0 0 12px;
+  font-size: 18px;
+  font-weight: 700;
+}
+.helper {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* ---------- Buttons ---------- */
+.btn {
+  appearance: none;
+  border: 0;
+  color: var(--text);
+  background: #171a26;
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-weight: 600;
+  transition: transform .08s ease, box-shadow .15s ease, background .15s ease, border-color .15s ease;
+  border: 1px solid rgba(255,255,255,0.06);
+}
+.btn:hover { transform: translateY(-1px); }
+.btn:active { transform: translateY(0); }
+
+.btn-primary {
+  background: linear-gradient(180deg, var(--accent), #5a30ff);
+  box-shadow: 0 8px 24px rgba(124,77,255,0.35);
+  border-color: rgba(124,77,255,0.5);
+}
+.btn-primary:hover { box-shadow: 0 10px 26px rgba(124,77,255,0.45); }
+
+.btn-ghost {
+  background: #121523;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+/* ---------- Inputs ---------- */
+.input {
+  width: 100%;
+  color: var(--text);
+  background: #0f1220;
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 12px;
+  padding: 12px 14px;
+  outline: none;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.input::placeholder { color: #7b81a1; }
+.input:focus {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 4px rgba(124,77,255,.14);
+}
+
+/* ---------- Grid for wallet buttons ---------- */
+.wallet-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
