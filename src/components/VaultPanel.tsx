@@ -1,28 +1,40 @@
 // src/components/VaultPanel.tsx
-// One-click "Send 1 NFT to Vault" with direct writeContract (no simulate).
-// If auto-pick fails, use Advanced -> Send by ID.
+// One-click: Send EXACTLY 1 NFT from the allowed collection to VAULT.
+// Direct writeContract (no simulate) + auto network switch + manual fallback.
 // Comments in English only.
 
 'use client';
 
 import { useEffect, useState } from "react";
 import { zeroAddress } from "viem";
-import { useAccount, useChainId, useConfig, useSwitchChain } from "wagmi";
-import { getPublicClient, readContract, writeContract } from "@wagmi/core";
+import {
+  useAccount,
+  useChainId,
+  useConfig,
+  useSwitchChain,
+} from "wagmi";
+import {
+  getPublicClient,
+  readContract,
+  writeContract,
+} from "@wagmi/core";
 
-/* ===== Consts & ABIs ===== */
+/* ===== ENV / CONSTS ===== */
+const MONAD_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 const ALLOWED_CONTRACT = "0x88c78d5852f45935324c6d100052958f694e8446";
 const VAULT = (import.meta.env.VITE_VAULT_ADDRESS as string) || zeroAddress;
-const MONAD_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 
+/* ===== ABIs ===== */
+// ERC-165
 const ERC165_ABI = [
   { type: "function", name: "supportsInterface", stateMutability: "view",
     inputs: [{ name: "interfaceId", type: "bytes4" }], outputs: [{ type: "bool" }] },
 ] as const;
-const IFACE_ERC721       = "0x80ac58cd";
-const IFACE_ERC1155      = "0xd9b67a26";
-const IFACE_ERC721_ENUM  = "0x780e9d63";
+const IFACE_ERC721      = "0x80ac58cd";
+const IFACE_ERC1155     = "0xd9b67a26";
+const IFACE_ERC721_ENUM = "0x780e9d63";
 
+// ERC-721 minimal
 const ERC721_ABI = [
   { type: "function", name: "ownerOf", stateMutability: "view",
     inputs: [{ name: "tokenId", type: "uint256" }], outputs: [{ type: "address" }] },
@@ -37,14 +49,16 @@ const ERC721_ABI = [
 ] as const;
 
 const ERC721_TRANSFER_EVT = {
-  type: "event", name: "Transfer",
+  type: "event",
+  name: "Transfer",
   inputs: [
-    { indexed: true,  name: "from",    type: "address" },
-    { indexed: true,  name: "to",      type: "address" },
-    { indexed: true,  name: "tokenId", type: "uint256" },
+    { indexed: true, name: "from", type: "address" },
+    { indexed: true, name: "to",   type: "address" },
+    { indexed: true, name: "tokenId", type: "uint256" },
   ],
 } as const;
 
+// ERC-1155 minimal
 const ERC1155_ABI = [
   { type: "function", name: "balanceOf", stateMutability: "view",
     inputs: [{ name: "account", type: "address" }, { name: "id", type: "uint256" }],
@@ -58,40 +72,44 @@ const ERC1155_ABI = [
 ] as const;
 
 const ERC1155_TRANSFER_SINGLE = {
-  type: "event", name: "TransferSingle",
+  type: "event",
+  name: "TransferSingle",
   inputs: [
-    { indexed: true, name: "operator", type: "address" },
-    { indexed: true, name: "from",     type: "address" },
-    { indexed: true, name: "to",       type: "address" },
-    { indexed: false,name: "id",       type: "uint256" },
-    { indexed: false,name: "value",    type: "uint256" },
+    { indexed: true,  name: "operator", type: "address" },
+    { indexed: true,  name: "from",     type: "address" },
+    { indexed: true,  name: "to",       type: "address" },
+    { indexed: false, name: "id",       type: "uint256" },
+    { indexed: false, name: "value",    type: "uint256" },
   ],
 } as const;
 
 const ERC1155_TRANSFER_BATCH = {
-  type: "event", name: "TransferBatch",
+  type: "event",
+  name: "TransferBatch",
   inputs: [
-    { indexed: true, name: "operator", type: "address" },
-    { indexed: true, name: "from",     type: "address" },
-    { indexed: true, name: "to",       type: "address" },
-    { indexed: false,name: "ids",      type: "uint256[]" },
-    { indexed: false,name: "values",   type: "uint256[]" },
+    { indexed: true,  name: "operator", type: "address" },
+    { indexed: true,  name: "from",     type: "address" },
+    { indexed: true,  name: "to",       type: "address" },
+    { indexed: false, name: "ids",      type: "uint256[]" },
+    { indexed: false, name: "values",   type: "uint256[]" },
   ],
 } as const;
 
-/* ===== Tiny local lives store ===== */
-const KEY = "wg_lives_v1";
-const k = (cid:number, addr:string)=>`${cid}:${addr.toLowerCase()}`;
-const getLives = (cid:number, addr?:string|null)=> {
-  if (!addr) return 0; const raw = localStorage.getItem(KEY);
-  const map = raw ? JSON.parse(raw) as Record<string,number> : {};
-  return map[k(cid,addr)] ?? 0;
+/* ===== Local lives store (inline) ===== */
+const LKEY = "wg_lives_v1";
+const lKey = (cid:number, addr:string)=>`${cid}:${addr.toLowerCase()}`;
+const getLives = (cid:number, addr?:string|null) => {
+  if (!addr) return 0;
+  const raw = localStorage.getItem(LKEY);
+  const map = raw ? (JSON.parse(raw) as Record<string, number>) : {};
+  return map[lKey(cid, addr)] ?? 0;
 };
-const addLives = (cid:number, addr:string, d=1)=> {
-  const raw = localStorage.getItem(KEY);
-  const map = raw ? JSON.parse(raw) as Record<string,number> : {};
-  const key = k(cid,addr); map[key]=(map[key]??0)+d;
-  localStorage.setItem(KEY, JSON.stringify(map)); return map[key];
+const addLives = (cid:number, addr:string, d=1) => {
+  const raw = localStorage.getItem(LKEY);
+  const map = raw ? (JSON.parse(raw) as Record<string, number>) : {};
+  const k = lKey(cid, addr); map[k] = (map[k] ?? 0) + d;
+  localStorage.setItem(LKEY, JSON.stringify(map));
+  return map[k];
 };
 
 /* ===== Component ===== */
@@ -107,11 +125,14 @@ export default function VaultPanel() {
   const [log, setLog] = useState("");
   const [busy, setBusy] = useState(false);
   const [lives, setLives] = useState(() => getLives(chainId ?? 0, address));
+
+  // Advanced manual
   const [advanced, setAdvanced] = useState(false);
   const [manualId, setManualId] = useState("");
 
-  function append(s: string) { setLog(p => (p ? p+"\n" : "") + s); }
+  function append(s: string) { setLog((p) => (p ? p + "\n" : "") + s); }
 
+  // Detect standard via ERC-165
   useEffect(() => {
     (async () => {
       try {
@@ -128,23 +149,23 @@ export default function VaultPanel() {
         });
         if (is1155) { setStd("ERC1155"); append("✓ Detected ERC-1155"); return; }
         append("⚠️ Unknown standard; fallback will try both.");
-      } catch (e) {
+      } catch {
         append("ℹ️ ERC-165 detection failed; fallback enabled.");
-        console.error(e);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chainId]);
 
-  const onSwitch = async () => {
-    try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch (e) { append("Failed to switch chain."); }
-  };
+  async function ensureMonad() {
+    if (chainId !== MONAD_CHAIN_ID) {
+      await switchChain({ chainId: MONAD_CHAIN_ID });
+    }
+  }
 
   const canSend = isConnected && VAULT !== zeroAddress;
 
-  /* ---------- Auto-pick helpers (bounded, но лёгкие) ---------- */
+  /* ---------- Light auto-pick helpers ---------- */
 
-  // Try ERC721Enumerable, else tail logs in small window; else give up
   async function pickAnyErc721(user: `0x${string}`): Promise<bigint | null> {
     try {
       const enumerable = await readContract(cfg, {
@@ -152,21 +173,21 @@ export default function VaultPanel() {
         functionName: "supportsInterface", args: [IFACE_ERC721_ENUM as `0x${string}`],
       });
       if (enumerable) {
-        const bal = await readContract(cfg, {
+        const bal = (await readContract(cfg, {
           abi: ERC721_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
           functionName: "balanceOf", args: [user],
-        }) as bigint;
+        })) as bigint;
         if (bal > 0n) {
-          const id0 = await readContract(cfg, {
+          const id0 = (await readContract(cfg, {
             abi: ERC721_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
             functionName: "tokenOfOwnerByIndex", args: [user, 0n],
-          }) as bigint;
+          })) as bigint;
           return id0;
         }
       }
     } catch {}
     try {
-      const pc = getPublicClient(cfg, { chainId });
+      const pc = getPublicClient(cfg, { chainId: MONAD_CHAIN_ID });
       const latest = await pc.getBlockNumber();
       const from = latest > 80_000n ? latest - 80_000n : 0n;
       const logs = await pc.getLogs({
@@ -178,10 +199,10 @@ export default function VaultPanel() {
       for (let i = logs.length - 1; i >= 0; i--) {
         const id = logs[i].args?.tokenId as bigint;
         try {
-          const owner = await readContract(cfg, {
+          const owner = (await readContract(cfg, {
             abi: ERC721_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
             functionName: "ownerOf", args: [id],
-          }) as `0x${string}`;
+          })) as `0x${string}`;
           if (owner.toLowerCase() === user.toLowerCase()) return id;
         } catch {}
       }
@@ -189,10 +210,9 @@ export default function VaultPanel() {
     return null;
   }
 
-  // Try find any 1155 id in small window
   async function pickAnyErc1155(user: `0x${string}`): Promise<bigint | null> {
     try {
-      const pc = getPublicClient(cfg, { chainId });
+      const pc = getPublicClient(cfg, { chainId: MONAD_CHAIN_ID });
       const latest = await pc.getBlockNumber();
       const from = latest > 80_000n ? latest - 80_000n : 0n;
 
@@ -204,10 +224,10 @@ export default function VaultPanel() {
       });
       for (let i = logsSingle.length - 1; i >= 0; i--) {
         const id = logsSingle[i].args?.id as bigint;
-        const bal = await readContract(cfg, {
+        const bal = (await readContract(cfg, {
           abi: ERC1155_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
           functionName: "balanceOf", args: [user, id],
-        }) as bigint;
+        })) as bigint;
         if (bal > 0n) return id;
       }
 
@@ -221,10 +241,10 @@ export default function VaultPanel() {
         const ids = logsBatch[i].args?.ids as bigint[];
         for (let j = ids.length - 1; j >= 0; j--) {
           const id = ids[j];
-          const bal = await readContract(cfg, {
+          const bal = (await readContract(cfg, {
             abi: ERC1155_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
             functionName: "balanceOf", args: [user, id],
-          }) as bigint;
+          })) as bigint;
           if (bal > 0n) return id;
         }
       }
@@ -232,25 +252,21 @@ export default function VaultPanel() {
     return null;
   }
 
-  /* ---------- MAIN ACTION: DIRECT WRITE ---------- */
+  /* ---------- Main actions (direct write) ---------- */
 
   async function sendOne() {
     if (!canSend || !address) return;
-
     setBusy(true); setLog("");
 
-    // Pre-flight checks
-    if (chainId !== MONAD_CHAIN_ID) {
-      append(`Wrong network: Chain ID ${chainId}. Need ${MONAD_CHAIN_ID}.`);
-      setBusy(false); return;
-    }
-    if (VAULT === zeroAddress) {
-      append("VAULT address not set (VITE_VAULT_ADDRESS).");
-      setBusy(false); return;
-    }
-
     try {
-      // 1) Try ERC-721 (or UNKNOWN first)
+      if (VAULT === zeroAddress) {
+        append("VAULT not set (VITE_VAULT_ADDRESS).");
+        setBusy(false); return;
+      }
+
+      await ensureMonad();
+
+      // Try ERC-721 first (or UNKNOWN)
       if (std === "ERC721" || std === "UNKNOWN") {
         const id = await pickAnyErc721(address as `0x${string}`);
         if (id !== null) {
@@ -271,7 +287,7 @@ export default function VaultPanel() {
         if (std === "ERC721") append("No ERC-721 found in small window.");
       }
 
-      // 2) Try ERC-1155
+      // Try ERC-1155
       const id1155 = await pickAnyErc1155(address as `0x${string}`);
       if (id1155 !== null) {
         append(`Sending ERC-1155 id=${id1155} x1 → VAULT...`);
@@ -289,10 +305,9 @@ export default function VaultPanel() {
         setBusy(false); return;
       }
 
-      append("❌ Auto-pick failed. Use Advanced -> Send by ID.");
-    } catch (e:any) {
+      append("❌ Auto-pick failed. Use Advanced → Send by ID.");
+    } catch (e: any) {
       console.error(e);
-      // Better error messages
       const m = e?.shortMessage || e?.message || "write failed";
       if (/user rejected/i.test(m)) append("❌ Rejected in wallet.");
       else if (/insufficient funds/i.test(m)) append("❌ Not enough MON for gas.");
@@ -303,20 +318,20 @@ export default function VaultPanel() {
     }
   }
 
-  /* ---------- Manual fallback ---------- */
   async function sendManual() {
     if (!address || !manualId) return;
-    if (chainId !== MONAD_CHAIN_ID) { append(`Switch to ${MONAD_CHAIN_ID} first.`); return; }
-
     try {
+      await ensureMonad();
       const id = BigInt(manualId);
+
       if (std === "ERC1155") {
         const tx = await writeContract(cfg, {
           abi: ERC1155_ABI,
           address: ALLOWED_CONTRACT as `0x${string}`,
           functionName: "safeTransferFrom",
           args: [address, VAULT as `0x${string}`, id, 1n, "0x"],
-          account: address, chainId: MONAD_CHAIN_ID,
+          account: address,
+          chainId: MONAD_CHAIN_ID,
         });
         append(`✅ Sent 1155 id=${id}: ${tx}`);
       } else {
@@ -325,10 +340,12 @@ export default function VaultPanel() {
           address: ALLOWED_CONTRACT as `0x${string}`,
           functionName: "safeTransferFrom",
           args: [address, VAULT as `0x${string}`, id],
-          account: address, chainId: MONAD_CHAIN_ID,
+          account: address,
+          chainId: MONAD_CHAIN_ID,
         });
         append(`✅ Sent 721 #${id}: ${tx}`);
       }
+
       const total = addLives(MONAD_CHAIN_ID, address, 1); setLives(total);
       append(`+1 life (total: ${total})`);
     } catch (e:any) {
@@ -346,24 +363,32 @@ export default function VaultPanel() {
         Allowed: <span className="font-mono">{ALLOWED_CONTRACT}</span>
       </div>
       <div className="mb-3 text-sm">
-        Network: {chainId} {chainId !== MONAD_CHAIN_ID && (
-          <button className="ml-2 rounded border border-zinc-700 px-2 py-1 text-xs" onClick={onSwitch}>
+        Network: {chainId}{" "}
+        {chainId !== MONAD_CHAIN_ID && (
+          <button
+            className="ml-2 rounded border border-zinc-700 px-2 py-1 text-xs"
+            onClick={ensureMonad}
+          >
             Switch to Monad
           </button>
         )}
       </div>
 
       <div className="mb-3 text-lg font-semibold">Send 1 NFT to Vault → get 1 life</div>
+
       <button
         className="rounded-xl border border-zinc-700 px-4 py-2 text-sm hover:bg-zinc-800 disabled:opacity-50"
-        disabled={!isConnected || VAULT === zeroAddress || busy}
+        disabled={!canSend || busy}
         onClick={sendOne}
       >
         {busy ? "Sending…" : "Send 1 NFT to Vault"}
       </button>
 
       <div className="mt-3">
-        <button className="text-xs underline text-zinc-400" onClick={() => setAdvanced(v=>!v)}>
+        <button
+          className="text-xs underline text-zinc-400"
+          onClick={() => setAdvanced(v => !v)}
+        >
           {advanced ? "Hide" : "Advanced"} (manual id)
         </button>
         {advanced && (
@@ -377,7 +402,7 @@ export default function VaultPanel() {
             <button
               className="rounded-lg border border-zinc-700 px-3 py-2 text-sm"
               onClick={sendManual}
-              disabled={!isConnected || !manualId}
+              disabled={!canSend || !manualId}
             >
               Send by ID
             </button>
