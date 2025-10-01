@@ -14,6 +14,9 @@ import { injected, walletConnect, coinbaseWallet } from "wagmi/connectors";
 import { defineChain } from "viem";
 import VaultPanel from "./components/VaultPanel";
 import "./styles.css";
+import Tamagotchi from "./components/Tamagotchi";
+import { GameProvider } from "./game/useGame";
+import { PetConfig } from "./game/types";
 
 /* ===== ENV ===== */
 const MONAD_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
