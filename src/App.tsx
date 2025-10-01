@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import {
   http,
   createConfig,
-  WagmiProvider,            // wagmi v2
+  WagmiProvider,
   useAccount,
   useConnect,
   useDisconnect,
@@ -29,18 +29,19 @@ const MONAD_TESTNET = defineChain({
 });
 
 // -------- Connectors --------
+// QR-модалку временно отключаем (showQrModal: false), чтобы не тянуть пакет модалки
 const connectorsList = [
   injected(),
   WC_ID
     ? walletConnect({
         projectId: WC_ID,
-        showQrModal: true, // откроет QR-окно Reown
+        showQrModal: false, // ← временно без модалки
         metadata: {
           name: "WoollyGotchi",
           description: "Tamagotchi mini-app on Monad testnet",
           url: typeof window !== "undefined" ? window.location.origin : "https://example.com",
-          icons: ["https://raw.githubusercontent.com/twitter/twemoji/master/assets/svg/1f999.svg"]
-        }
+          icons: ["https://raw.githubusercontent.com/twitter/twemoji/master/assets/svg/1f999.svg"],
+        },
       })
     : null,
   coinbaseWallet({ appName: "WoollyGotchi" }),
@@ -129,9 +130,9 @@ function AppInner() {
               {c.name === "Injected" ? "MetaMask / Browser" : c.name}
             </button>
           ))}
-          {!WC_ID && (
-            <div style={{ fontSize: 12, opacity: 0.6 }}>
-              (Set VITE_WALLETCONNECT_PROJECT_ID to enable WalletConnect QR)
+          {WC_ID && (
+            <div style={{ fontSize: 12, opacity: 0.6, width: "100%" }}>
+              WalletConnect работает. QR-модалку добавим на следующем шаге (Reown AppKit).
             </div>
           )}
         </div>
