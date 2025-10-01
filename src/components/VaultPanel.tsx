@@ -1,14 +1,14 @@
 // src/components/VaultPanel.tsx
 // Accept ONLY from the allowed contract; transfer to VAULT; +1 life per NFT.
+// Uses the same wagmi config as your Provider via useConfig().
 // Comments in English only.
 
 'use client';
 
 import { useEffect, useState } from "react";
 import { zeroAddress } from "viem";
-import { useAccount, useChainId } from "wagmi";
+import { useAccount, useChainId, useConfig } from "wagmi";
 import { readContract, simulateContract, writeContract } from "@wagmi/core";
-import { wagmiConfigLike } from "../wagmiConfigLike";
 import { ERC721_ABI } from "../abi/erc721";
 import { ERC1155_ABI } from "../abi/erc1155";
 import { ERC165_ABI, IFACE_ERC1155, IFACE_ERC721 } from "../abi/erc165";
@@ -22,6 +22,7 @@ const ALLOWED_CONTRACT = "0x88c78d5852f45935324c6d100052958f694e8446";
 const VAULT = (import.meta.env.VITE_VAULT_ADDRESS as string) || zeroAddress;
 
 export default function VaultPanel() {
+  const cfg = useConfig(); // <-- use the same config as WagmiProvider
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
 
@@ -35,14 +36,14 @@ export default function VaultPanel() {
     setLog((p) => (p ? p + "\n" : "") + s);
   }
 
-  // Auto-detect standard with ERC-165
+  // Auto-detect standard with ERC-165 using the same config
   useEffect(() => {
     (async () => {
       try {
         setStd("UNKNOWN");
         setLog("");
         append("Detecting token standard via ERC-165...");
-        const is721 = await readContract(wagmiConfigLike, {
+        const is721 = await readContract(cfg, {
           abi: ERC165_ABI,
           address: ALLOWED_CONTRACT as `0x${string}`,
           functionName: "supportsInterface",
@@ -53,7 +54,7 @@ export default function VaultPanel() {
           append("✓ Detected ERC-721");
           return;
         }
-        const is1155 = await readContract(wagmiConfigLike, {
+        const is1155 = await readContract(cfg, {
           abi: ERC165_ABI,
           address: ALLOWED_CONTRACT as `0x${string}`,
           functionName: "supportsInterface",
@@ -80,7 +81,8 @@ export default function VaultPanel() {
     const id = BigInt(tokenId);
     append(`Transferring ERC-721 #${id} → VAULT...`);
 
-    const sim = await simulateContract(wagmiConfigLike, {
+    // Use the same config; include account so wallet client is used
+    const sim = await simulateContract(cfg, {
       abi: ERC721_ABI,
       address: ALLOWED_CONTRACT as `0x${string}`,
       functionName: "safeTransferFrom",
@@ -89,7 +91,7 @@ export default function VaultPanel() {
       chainId,
     });
 
-    const txHash = await writeContract(wagmiConfigLike, sim.request);
+    const txHash = await writeContract(cfg, sim.request);
     append(`✅ Sent: ${txHash}`);
 
     const total = addLives(chainId, address, 1);
@@ -103,7 +105,7 @@ export default function VaultPanel() {
     const qty = BigInt(amount || "1");
     append(`Transferring ERC-1155 id=${id} x${qty} → VAULT...`);
 
-    const sim = await simulateContract(wagmiConfigLike, {
+    const sim = await simulateContract(cfg, {
       abi: ERC1155_ABI,
       address: ALLOWED_CONTRACT as `0x${string}`,
       functionName: "safeTransferFrom",
@@ -112,7 +114,7 @@ export default function VaultPanel() {
       chainId,
     });
 
-    const txHash = await writeContract(wagmiConfigLike, sim.request);
+    const txHash = await writeContract(cfg, sim.request);
     append(`✅ Sent: ${txHash}`);
 
     const total = addLives(chainId, address, Number(qty));
