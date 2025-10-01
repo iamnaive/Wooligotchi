@@ -79,7 +79,33 @@ function short(addr?: `0x${string}`) {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
-/* ===== TEMP PET CONFIG (заменишь кадры на свои) ===== */
+/* ===== Lives gate helpers (same storage as VaultPanel) ===== */
+const LIVES_KEY = "wg_lives_v1";
+const lKey = (cid:number, addr:string)=>`${cid}:${addr.toLowerCase()}`;
+function getLivesLocal(cid:number, addr?:`0x${string}`|null){
+  if (!addr) return 0;
+  try {
+    const raw = localStorage.getItem(LIVES_KEY);
+    const map = raw ? (JSON.parse(raw) as Record<string, number>) : {};
+    return map[lKey(cid, addr)] ?? 0;
+  } catch { return 0; }
+}
+function useLivesGate(chainId:number, address?:`0x${string}`|null){
+  const [lives, setLives] = React.useState(0);
+  React.useEffect(()=>{
+    setLives(getLivesLocal(chainId, address));
+    const onStorage = (e: StorageEvent)=>{
+      if (e.key === LIVES_KEY) setLives(getLivesLocal(chainId, address));
+    };
+    const onCustom = ()=> setLives(getLivesLocal(chainId, address));
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('wg:lives-changed', onCustom as any);
+    return ()=>{ window.removeEventListener('storage', onStorage); window.removeEventListener('wg:lives-changed', onCustom as any); };
+  }, [chainId, address]);
+  return lives;
+}
+
+/* ===== TEMP PET CONFIG (заменишь пути на свои) ===== */
 const petConfig: PetConfig = {
   name: "Tamagotchi",
   fps: 8,
@@ -147,6 +173,7 @@ function AppInner() {
   const { switchChain } = useSwitchChain();
   const { data: balance } = useBalance({ address, chainId, query: { enabled: !!address } });
   const [pickerOpen, setPickerOpen] = useState(false);
+  const lives = useLivesGate(MONAD_CHAIN_ID, address);
 
   const walletItems = useMemo(
     () =>
@@ -211,13 +238,24 @@ function AppInner() {
         )}
       </header>
 
-      {/* Vault panel (обмен 1 NFT -> 1 жизнь) */}
-      <VaultPanel />
-
-      {/* Игра Тамагочи */}
-      <GameProvider config={petConfig}>
-        <Tamagotchi />
-      </GameProvider>
+      {/* Lives gate: если жизней нет — показываем только панель пополнения */}
+      {lives <= 0 ? (
+        <section className="card" style={{marginTop:12}}>
+          <div className="card-title">Play access</div>
+          <div className="muted" style={{marginBottom:10}}>
+            Чтобы играть, отправь 1 NFT из коллекции <span className="pill">0x88c7…8446</span> в наш Vault.
+            За каждую отправку: +1 жизнь. После подтверждения транзакции мини-игра разблокируется автоматически.
+          </div>
+          <VaultPanel />
+        </section>
+      ) : (
+        <>
+          <GameProvider config={petConfig}>
+            <Tamagotchi />
+          </GameProvider>
+          {/* опционально: <VaultPanel /> ниже, чтобы докидывать жизни не выходя из игры */}
+        </>
+      )}
 
       <footer className="foot">
         <span className="muted">Status: {status}</span>
