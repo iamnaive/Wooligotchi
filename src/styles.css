@@ -1,4 +1,4 @@
-/* ====== S O U P E D   U P  D A R K  U I  (no libs) ====== */
+/* ====== WOOLIGOTCHI UI (dark, no libs) ====== */
 :root{
   --bg0:#07070c;
   --bg1:#0b0e17;
@@ -12,7 +12,6 @@
   --ok:#36e38a;
   --warn:#ffd36d;
   --err:#ff6b74;
-  --glass: blur(10px) saturate(1.05);
   --r:16px;
   --shadow: 0 14px 40px rgba(0,0,0,.45), 0 1px 0 rgba(255,255,255,.04) inset;
 }
@@ -39,7 +38,6 @@ html,body{
   display:grid; place-items:center; font-size:22px;
   background:radial-gradient(120% 120% at 30% 20%, #8a66ff 0%, #5b32e8 40%, #2a2f46 85%);
   box-shadow: 0 10px 25px rgba(124,77,255,.45);
-  transform: translateZ(0);
 }
 .title{
   font-weight:900; line-height:1.05;
@@ -58,12 +56,7 @@ html,body{
   border-radius: var(--r);
   box-shadow: var(--shadow);
   padding:16px;
-  backdrop-filter: var(--glass);
-}
-.card::before{
-  content:""; position:absolute; inset:0; border-radius:inherit; pointer-events:none;
-  background: conic-gradient(from 180deg at 50% 50%, rgba(124,77,255,.15), transparent 25%, rgba(0,183,255,.12), transparent 60%, rgba(124,77,255,.15));
-  filter: blur(18px); opacity:.35; z-index:-1;
+  backdrop-filter: blur(10px) saturate(1.05);
 }
 .card + .card{ margin-top:12px; }
 .card-title{ font-size:16px; font-weight:800; margin:0 0 10px; }
@@ -76,7 +69,6 @@ html,body{
   padding:10px 14px; border-radius:12px; cursor:pointer;
   transition: transform .08s ease, box-shadow .18s ease, border-color .18s ease, background .18s ease, filter .18s ease;
   box-shadow: var(--shadow);
-  will-change: transform, filter;
 }
 .btn:hover{ transform: translateY(-1px); border-color:#2b3350; filter: saturate(1.08); }
 .btn:active{ transform: translateY(0); }
@@ -89,12 +81,10 @@ html,body{
   color:white; font-weight:800; letter-spacing:.2px;
   box-shadow: 0 15px 36px rgba(124,77,255,.45);
 }
-.btn-primary:hover{ box-shadow: 0 22px 44px rgba(124,77,255,.55); }
-.btn.ghost{ background:transparent; border-color:#2a2f46; color:var(--muted); }
 .btn-ghost{ background:linear-gradient(180deg, #12172a, #0e1426); border:1px solid #232846; }
-.btn-danger{ background: linear-gradient(180deg, #ff6b6b, #e04646); border-color:transparent; color:white; }
-.btn-success{ background: linear-gradient(180deg, #3bd671, #22b35b); border-color:transparent; color:#03140b; }
+.btn-lg{ padding:16px 22px; font-size:16px; }
 
+/* ===== Pills / inputs ===== */
 .pill{
   padding:6px 10px; border-radius:999px;
   background:linear-gradient(180deg, #111523, #0f1426);
@@ -103,46 +93,98 @@ html,body{
 }
 .walletRow{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
 .muted{ color:var(--muted); }
-
-/* ===== Inputs ===== */
 .input{
   width:100%; background:#0e1325; color:var(--text);
   border:1px solid var(--border); border-radius:12px;
   padding:10px 12px; outline:none; box-shadow: var(--shadow);
 }
-.input::placeholder{ color:#6b708a; }
-.input:focus{ border-color:#33406a; box-shadow: 0 0 0 3px rgba(124,77,255,.15), var(--shadow); }
 
-/* ===== Wallet modal ===== */
+/* ===== Modal ===== */
 .modal{ position: fixed; inset:0; display:flex; align-items:center; justify-content:center; background: rgba(0,0,0,.45); z-index:9999; }
 .wallet-grid{ display:grid; grid-template-columns:1fr; gap:10px; }
-@media (min-width:520px){ .wallet-grid{ grid-template-columns:1fr; } }
-.helper{ color:var(--muted); font-size:12px; }
+
+/* ===== Splash (start screen) ===== */
+.splash{
+  min-height: 62vh;
+  display:grid; place-items:center;
+}
+.splash-inner{
+  text-align:center;
+  display:grid; gap:16px;
+}
+.splash-title{
+  font-size: clamp(30px,5vw,50px);
+  font-weight: 900;
+  letter-spacing:.6px;
+  background: linear-gradient(90deg, #ffffff, #d8dcff 40%, #c7b8ff 70%, #ffe2ff);
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+
+/* ===== Game shell (green outline) ===== */
+.game-shell{
+  border: 2px solid #21c77b66; /* green frame per spec */
+  border-radius: 18px;
+  padding: 16px;
+  margin-top: 12px;
+  box-shadow: 0 10px 36px rgba(0,0,0,.35);
+  background: linear-gradient(180deg, rgba(20,24,42,.6), rgba(12,16,31,.6));
+}
+
+/* layout: avatar | stage
+           hud spans two columns */
+.game-grid{
+  display:grid;
+  grid-template-columns: 220px 1fr;
+  grid-template-rows: auto auto;
+  gap: 16px;
+}
+
+/* ===== Avatar (purple box) ===== */
+.avatar{
+  grid-column: 1;
+  grid-row: 1 / span 1;
+  height: 220px;
+  display:grid; place-items:center;
+  border: 2px solid #a06bff66; /* purple frame */
+  border-radius: 16px;
+  background: linear-gradient(180deg,#1a1530,#12142a);
+}
+
+/* ===== Stage (red box) ===== */
+.stage{
+  grid-column: 2;
+  grid-row: 1;
+  min-height: 220px;
+  border: 2px solid #ff5b5b66; /* red frame */
+  border-radius: 16px;
+  overflow: hidden;
+  position: relative;
+  background:
+    radial-gradient(100% 100% at 20% 10%, rgba(124,77,255,.18), transparent 60%),
+    linear-gradient(180deg,#0f1426,#0c1223);
+}
+
+/* ===== HUD (yellow box) ===== */
+.hud{
+  grid-column: 1 / span 2;
+  grid-row: 2;
+  border:2px solid #ffd36d66; /* yellow frame */
+  border-radius: 16px;
+  padding: 12px;
+  background: linear-gradient(180deg,#12172a,#0e1426);
+  display:grid; gap:12px;
+}
+
+/* ===== Progress bars ===== */
+.stat{
+  display:grid; gap:6px;
+}
+.stat-label{ font-size:12px; color:var(--muted); }
+.stat-bar{ height:8px; border-radius:999px; background:#14192e; border:1px solid #222846; overflow:hidden; }
+.stat-fill{ height:100%; background:linear-gradient(90deg,#7c4dff,#22b35b); box-shadow: 0 0 10px rgba(124,77,255,.35) inset; }
 
 /* ===== Log ===== */
-pre{ margin:0; white-space:pre-wrap; word-break:break-word; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+pre{ margin:0; white-space:pre-wrap; word-break:break-word; font-family: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace; }
 .log{
-  background:#0c1122; border:1px solid #1b2340; border-radius:12px; padding:12px; color:#dfe3ff; font-size:12px; box-shadow: var(--shadow);
+  background:#0c1122; border:1px solid #1b2340; border-radius:12px; padding:12px; color:#dfe3ff; font-size:12px;
 }
-.log .ok{ color:var(--ok); } .log .warn{ color:var(--warn); } .log .err{ color:var(--err); }
-
-/* ===== Hearts / badges ===== */
-.hearts{ display:flex; gap:6px; align-items:center; }
-.heart{
-  width:18px; height:18px; border-radius:4px; display:grid; place-items:center;
-  background: radial-gradient(120% 120% at 30% 20%, #ff9ab1 0%, #ff6b93 45%, #a21a4a 100%);
-  box-shadow: 0 8px 20px rgba(255,77,131,.35);
-  transform: translateZ(0);
-}
-.heart svg{ width:12px; height:12px; fill:white; filter: drop-shadow(0 1px 6px rgba(255,255,255,.25)); }
-.heart.off{ background: linear-gradient(180deg, #1b2034, #131729); box-shadow:none; opacity:.4; }
-
-/* tiny pulse when life added */
-@keyframes pop { 0%{ transform:scale(.85);} 70%{ transform:scale(1.05);} 100%{ transform:scale(1);} }
-.heart.pop{ animation: pop .35s ease-out; }
-
-/* ===== Utility ===== */
-.mt-2{margin-top:8px} .mt-3{margin-top:12px} .mt-6{margin-top:24px}
-.max-w-3xl{max-width:960px} .mx-auto{margin-inline:auto}
-.rounded-2xl{border-radius:20px}
-.foot{ color:var(--muted); font-size:12px; }
