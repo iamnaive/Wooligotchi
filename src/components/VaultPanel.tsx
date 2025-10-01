@@ -1,7 +1,10 @@
 // src/components/VaultPanel.tsx
-// Auto-pick ANY owned NFT on Monad (reads pinned to MONAD_CHAIN_ID) and send 1 unit to VAULT.
-// Faster: batched ownerOf/balanceOf probes (no logs). Direct writeContract. Wait for receipt -> add life.
-// Manual ID fallback kept. Comments in English only.
+// Fast auto-pick with caching + persistent lives.
+// 1) Try cached tokenId first (instant pop-up).
+// 2) Quick balanceOf(address) -> if 0, skip scan.
+// 3) Batched probes if needed.
+// 4) Wait receipt -> add life + persist.
+// Comments in English only.
 
 'use client';
 
@@ -15,13 +18,13 @@ const MONAD_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 const ALLOWED_CONTRACT = "0x88c78d5852f45935324c6d100052958f694e8446";
 const VAULT = (import.meta.env.VITE_VAULT_ADDRESS as string) || zeroAddress;
 
-/* ---- Probe tuning (you can tweak) ---- */
-const SMALL_FIRST_RANGE = 64;       // quick pass: 0..64
-const MAX_ERC721_PROBES = 500;      // overall ownerOf calls (cap)
-const MAX_ERC1155_PROBES = 500;     // overall balanceOf calls (cap)
-const DEFAULT_TOP_GUESS  = 10_000;  // fallback upper bound if no totalSupply
-const BATCH_SIZE         = 24;      // parallel calls per batch (speedup)
-const YIELD_EVERY        = 6;       // yield to UI every N batches
+/* ---- Probe tuning ---- */
+const SMALL_FIRST_RANGE = 64;      // quick pass: 0..64
+const MAX_ERC721_PROBES = 400;     // overall ownerOf calls cap
+const MAX_ERC1155_PROBES = 400;    // overall balanceOf calls cap
+const DEFAULT_TOP_GUESS  = 10_000; // fallback upper bound if no totalSupply
+const BATCH_SIZE         = 24;     // parallel calls per batch
+const YIELD_EVERY        = 6;      // yield to UI every N batches
 
 /* ===== ABIs ===== */
 const ERC165_ABI = [
@@ -62,21 +65,42 @@ const ERC1155_ABI = [
     outputs: [] },
 ] as const;
 
-/* ===== Tiny local lives store ===== */
-const LKEY = "wg_lives_v1";
-const lKey = (cid:number, addr:string)=>`${cid}:${addr.toLowerCase()}`;
+/* ===== Local persistence ===== */
+const LIVES_KEY = "wg_lives_v1";
+const LASTID_KEY = "wg_last_token_v1"; // stores { "<chain>:<addr>:<contract>:<std>": string(tokenId) }
+
+const livesKey = (cid:number, addr:string)=>`${cid}:${addr.toLowerCase()}`;
+const lastIdKey = (cid:number, addr:string, contract:string, std:"ERC721"|"ERC1155") =>
+  `${cid}:${addr.toLowerCase()}:${contract.toLowerCase()}:${std}`;
+
 const getLives = (cid:number, addr?:string|null) => {
   if (!addr) return 0;
-  const raw = localStorage.getItem(LKEY);
+  const raw = localStorage.getItem(LIVES_KEY);
   const map = raw ? (JSON.parse(raw) as Record<string, number>) : {};
-  return map[lKey(cid, addr)] ?? 0;
+  return map[livesKey(cid, addr)] ?? 0;
+};
+const setLivesPersist = (cid:number, addr:string, val:number) => {
+  const raw = localStorage.getItem(LIVES_KEY);
+  const map = raw ? (JSON.parse(raw) as Record<string, number>) : {};
+  map[livesKey(cid, addr)] = val;
+  localStorage.setItem(LIVES_KEY, JSON.stringify(map));
+  return val;
 };
 const addLives = (cid:number, addr:string, d=1) => {
-  const raw = localStorage.getItem(LKEY);
-  const map = raw ? (JSON.parse(raw) as Record<string, number>) : {};
-  const k = lKey(cid, addr); map[k] = (map[k] ?? 0) + d;
-  localStorage.setItem(LKEY, JSON.stringify(map));
-  return map[k];
+  const cur = getLives(cid, addr);
+  return setLivesPersist(cid, addr, cur + d);
+};
+const getCachedId = (cid:number, addr:string, contract:string, std:"ERC721"|"ERC1155") => {
+  const raw = localStorage.getItem(LASTID_KEY);
+  const map = raw ? (JSON.parse(raw) as Record<string, string>) : {};
+  const v = map[lastIdKey(cid, addr, contract, std)];
+  return v ? BigInt(v) : null;
+};
+const setCachedId = (cid:number, addr:string, contract:string, std:"ERC721"|"ERC1155", id:bigint) => {
+  const raw = localStorage.getItem(LASTID_KEY);
+  const map = raw ? (JSON.parse(raw) as Record<string, string>) : {};
+  map[lastIdKey(cid, addr, contract, std)] = id.toString();
+  localStorage.setItem(LASTID_KEY, JSON.stringify(map));
 };
 
 /* ===== Component ===== */
@@ -96,8 +120,14 @@ export default function VaultPanel() {
   const [mode, setMode] = useState<"balanced"|"fast">("balanced");
 
   function append(s: string) { setLog((p) => (p ? p + "\n" : "") + s); }
+  const canSend = isConnected && VAULT !== zeroAddress;
 
-  // detect standard on Monad
+  // pick up lives when address appears/changes (persisted)
+  useEffect(() => {
+    if (address) setLives(getLives(MONAD_CHAIN_ID, address));
+  }, [address]);
+
+  // detect standard on Monad once
   useEffect(() => {
     (async () => {
       try {
@@ -123,39 +153,45 @@ export default function VaultPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const canSend = isConnected && VAULT !== zeroAddress;
-
   async function ensureMonad() {
     try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {/* Phantom may ignore; it's fine */ }
   }
 
-  /* ---------- Helpers (batched probes) ---------- */
-
+  /* ---------- Utils ---------- */
   const sleep = (ms:number)=>new Promise(r=>setTimeout(r,ms));
-
-  async function tryEnumerableFirst(user: `0x${string}`): Promise<bigint | null> {
-    try {
-      const enumerable = await readContract(cfg, {
-        abi: ERC165_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "supportsInterface", args: [IFACE_ERC721_ENUM as `0x${string}`],
-        chainId: MONAD_CHAIN_ID,
-      });
-      if (!enumerable) return null;
-
-      const bal = await readContract(cfg, {
-        abi: ERC721_READ_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "balanceOf", args: [user], chainId: MONAD_CHAIN_ID,
-      }) as bigint;
-      if (bal === 0n) return null;
-
-      const id0 = await readContract(cfg, {
-        abi: ERC721_READ_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "tokenOfOwnerByIndex", args: [user, 0n], chainId: MONAD_CHAIN_ID,
-      }) as bigint;
-      return id0;
-    } catch { return null; }
+  function chunkify(start: number, end: number, step = 1): number[][] {
+    const out: number[][] = []; let buf: number[] = [];
+    for (let i = start; step > 0 ? i <= end : i >= end; i += step) {
+      buf.push(i); if (buf.length === BATCH_SIZE) { out.push(buf); buf = []; }
+    }
+    if (buf.length) out.push(buf);
+    return out;
   }
 
+  async function ownerOfSafe(id: number): Promise<`0x${string}` | null> {
+    try {
+      return (await readContract(cfg, {
+        abi: ERC721_READ_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
+        functionName: "ownerOf", args: [BigInt(id)], chainId: MONAD_CHAIN_ID,
+      })) as `0x${string}`;
+    } catch { return null; }
+  }
+  async function balance721Of(user:`0x${string}`): Promise<bigint> {
+    try {
+      return (await readContract(cfg, {
+        abi: ERC721_READ_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
+        functionName: "balanceOf", args: [user], chainId: MONAD_CHAIN_ID,
+      })) as bigint;
+    } catch { return 0n; }
+  }
+  async function balance1155Safe(user: `0x${string}`, id: number): Promise<bigint> {
+    try {
+      return (await readContract(cfg, {
+        abi: ERC1155_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
+        functionName: "balanceOf", args: [user, BigInt(id)], chainId: MONAD_CHAIN_ID,
+      })) as bigint;
+    } catch { return 0n; }
+  }
   async function readTotalSupplyGuess(): Promise<number | null> {
     try {
       const ts = await readContract(cfg, {
@@ -167,25 +203,6 @@ export default function VaultPanel() {
     } catch { return null; }
   }
 
-  async function ownerOfSafe(id: number): Promise<`0x${string}` | null> {
-    try {
-      return (await readContract(cfg, {
-        abi: ERC721_READ_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "ownerOf", args: [BigInt(id)], chainId: MONAD_CHAIN_ID,
-      })) as `0x${string}`;
-    } catch { return null; }
-  }
-
-  async function balance1155Safe(user: `0x${string}`, id: number): Promise<bigint> {
-    try {
-      return (await readContract(cfg, {
-        abi: ERC1155_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "balanceOf", args: [user, BigInt(id)], chainId: MONAD_CHAIN_ID,
-      })) as bigint;
-    } catch { return 0n; }
-  }
-
-  // Batch an array of numeric ids with Promise.allSettled
   async function probe721Batch(user: `0x${string}`, ids: number[]): Promise<bigint | null> {
     const res = await Promise.allSettled(ids.map(ownerOfSafe));
     for (let i = 0; i < res.length; i++) {
@@ -207,27 +224,44 @@ export default function VaultPanel() {
     return null;
   }
 
-  function chunkify(start: number, end: number, step = 1): number[][] {
-    const out: number[][] = [];
-    let buf: number[] = [];
-    for (let i = start; step > 0 ? i <= end : i >= end; i += step) {
-      buf.push(i);
-      if (buf.length === BATCH_SIZE) { out.push(buf); buf = []; }
-    }
-    if (buf.length) out.push(buf);
-    return out;
+  async function tryEnumerableFirst(user: `0x${string}`): Promise<bigint | null> {
+    try {
+      const enumerable = await readContract(cfg, {
+        abi: ERC165_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
+        functionName: "supportsInterface", args: [IFACE_ERC721_ENUM as `0x${string}`],
+        chainId: MONAD_CHAIN_ID,
+      });
+      if (!enumerable) return null;
+      const bal = await balance721Of(user);
+      if (bal === 0n) return null;
+      const id0 = await readContract(cfg, {
+        abi: ERC721_READ_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
+        functionName: "tokenOfOwnerByIndex", args: [user, 0n], chainId: MONAD_CHAIN_ID,
+      }) as bigint;
+      return id0;
+    } catch { return null; }
   }
 
-  /* ---------- Auto-pick strategies ---------- */
+  /* ---------- Auto-pick with cache ---------- */
 
   async function pickAnyErc721(user: `0x${string}`): Promise<bigint | null> {
-    // Fast path: enumerable
+    // 0) cached id (instant)
+    const cached = getCachedId(MONAD_CHAIN_ID, user, ALLOWED_CONTRACT, "ERC721");
+    if (cached !== null) {
+      const owner = await ownerOfSafe(Number(cached));
+      if (owner && owner.toLowerCase() === user.toLowerCase()) return cached;
+    }
+
+    // 1) quick exit: balanceOf(address) === 0 => no scan
+    if ((await balance721Of(user)) === 0n) return null;
+
+    // 2) enumerable fast path
     const idEnum = await tryEnumerableFirst(user);
     if (idEnum !== null) return idEnum;
 
     let probes = 0;
 
-    // 1) small ids 0..SMALL_FIRST_RANGE (batched)
+    // 3) small ids 0..SMALL_FIRST_RANGE
     {
       const batches = chunkify(0, SMALL_FIRST_RANGE);
       for (let b = 0; b < batches.length; b++) {
@@ -239,7 +273,7 @@ export default function VaultPanel() {
       }
     }
 
-    // 2) descending from totalSupply/guess (batched)
+    // 4) descending from totalSupply/guess
     const topGuess = (await readTotalSupplyGuess()) ?? DEFAULT_TOP_GUESS;
     {
       const batches = chunkify(topGuess - 1, Math.max(0, topGuess - MAX_ERC721_PROBES), -1);
@@ -256,9 +290,16 @@ export default function VaultPanel() {
   }
 
   async function pickAnyErc1155(user: `0x${string}`): Promise<bigint | null> {
+    // cached id (instant)
+    const cached = getCachedId(MONAD_CHAIN_ID, user, ALLOWED_CONTRACT, "ERC1155");
+    if (cached !== null) {
+      const bal = await balance1155Safe(user, Number(cached));
+      if (bal > 0n) return cached;
+    }
+
     let probes = 0;
 
-    // 1) small ids 0..SMALL_FIRST_RANGE
+    // small ids
     {
       const batches = chunkify(0, SMALL_FIRST_RANGE);
       for (let b = 0; b < batches.length; b++) {
@@ -270,9 +311,8 @@ export default function VaultPanel() {
       }
     }
 
-    // 2) exponential hints 128..65536
-    const hints: number[] = [];
-    for (let v = 128; v <= 65536; v *= 2) hints.push(v);
+    // exponential hints
+    const hints: number[] = []; for (let v = 128; v <= 65536; v *= 2) hints.push(v);
     {
       const batches: number[][] = [];
       for (let i = 0; i < hints.length; i += BATCH_SIZE) {
@@ -290,14 +330,14 @@ export default function VaultPanel() {
     return null;
   }
 
-  /* ---------- Main actions (with receipt & lives) ---------- */
+  /* ---------- Main actions (with receipt & lives & cache) ---------- */
 
   async function sendOne() {
     if (!isConnected || VAULT === zeroAddress || !address) return;
     setBusy(true); setLog("");
 
     try {
-      await ensureMonad(); // try switch; reads are pinned anyway
+      await ensureMonad(); // try switch; reads are pinned to chainId anyway
 
       // prefer 721 first (or unknown)
       if (std === "ERC721" || std === "UNKNOWN") {
@@ -313,10 +353,10 @@ export default function VaultPanel() {
           });
           append(`✅ Tx sent: ${txHash}`);
 
-          // wait for receipt, then add life and update UI
           const pc = getPublicClient(cfg, { chainId: MONAD_CHAIN_ID });
           const receipt = await pc.waitForTransactionReceipt({ hash: txHash });
           if (receipt.status === "success") {
+            setCachedId(MONAD_CHAIN_ID, address, ALLOWED_CONTRACT, "ERC721", id); // cache for instant next time
             const total = addLives(MONAD_CHAIN_ID, address, 1);
             setLives(total);
             append(`+1 life (total: ${total})`);
@@ -343,6 +383,7 @@ export default function VaultPanel() {
         const pc = getPublicClient(cfg, { chainId: MONAD_CHAIN_ID });
         const receipt = await pc.waitForTransactionReceipt({ hash: txHash });
         if (receipt.status === "success") {
+          setCachedId(MONAD_CHAIN_ID, address, ALLOWED_CONTRACT, "ERC1155", id1155);
           const total = addLives(MONAD_CHAIN_ID, address, 1);
           setLives(total);
           append(`+1 life (total: ${total})`);
@@ -371,7 +412,6 @@ export default function VaultPanel() {
       await ensureMonad();
       const id = BigInt(manualId);
 
-      // try 1155 only if standard says so; otherwise assume 721
       if (std === "ERC1155") {
         const tx = await writeContract(cfg, {
           abi: ERC1155_ABI,
@@ -384,6 +424,7 @@ export default function VaultPanel() {
         const pc = getPublicClient(cfg, { chainId: MONAD_CHAIN_ID });
         const r = await pc.waitForTransactionReceipt({ hash: tx });
         if (r.status === "success") {
+          setCachedId(MONAD_CHAIN_ID, address, ALLOWED_CONTRACT, "ERC1155", id);
           const total = addLives(MONAD_CHAIN_ID, address, 1);
           setLives(total); append(`+1 life (total: ${total})`);
         } else append("❌ Tx reverted — life not granted.");
@@ -399,6 +440,7 @@ export default function VaultPanel() {
         const pc = getPublicClient(cfg, { chainId: MONAD_CHAIN_ID });
         const r = await pc.waitForTransactionReceipt({ hash: tx });
         if (r.status === "success") {
+          setCachedId(MONAD_CHAIN_ID, address, ALLOWED_CONTRACT, "ERC721", id);
           const total = addLives(MONAD_CHAIN_ID, address, 1);
           setLives(total); append(`+1 life (total: ${total})`);
         } else append("❌ Tx reverted — life not granted.");
