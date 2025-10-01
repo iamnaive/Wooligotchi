@@ -29,13 +29,13 @@ const MONAD_TESTNET = defineChain({
 });
 
 // -------- Connectors --------
-// QR-модалку временно отключаем (showQrModal: false), чтобы не тянуть пакет модалки
+// WalletConnect без QR-модалки (чтобы не тянуть проблемный пакет модалки).
 const connectorsList = [
-  injected(),
+  injected(), // MetaMask, Phantom, OKX и др. как injected
   WC_ID
     ? walletConnect({
         projectId: WC_ID,
-        showQrModal: false, // ← временно без модалки
+        showQrModal: false, // QR отключен; на мобиле открывай сайт в кошельке
         metadata: {
           name: "WoollyGotchi",
           description: "Tamagotchi mini-app on Monad testnet",
@@ -84,9 +84,28 @@ function AppInner() {
   const { writeContractAsync, status: writeStatus } = useWriteContract();
 
   const onConnect = async (connectorId?: string) => {
-    const c = connectorId ? connectors.find(x => x.id === connectorId) : connectors[0];
-    await connect({ connector: c! });
-    try { await switchChain({ chainId: MONAD_TESTNET.id }); } catch {}
+    try {
+      const c = connectorId ? connectors.find(x => x.id === connectorId) : connectors[0];
+      // если это injected и провайдера не видно — подсказка
+      if (c?.id === "injected") {
+        const hasProvider =
+          typeof window !== "undefined" &&
+          // @ts-ignore
+          (window.ethereum || (window as any).coinbaseWalletExtension || (window as any).phantom?.ethereum);
+        if (!hasProvider) {
+          alert(
+            "Браузерный кошелёк не найден/не разрешён на сайте. " +
+            "Установи/разреши MetaMask/Phantom и перезагрузи страницу, либо используй WalletConnect (моб. кошелёк)."
+          );
+          return;
+        }
+      }
+      await connect({ connector: c! });
+      try { await switchChain({ chainId: MONAD_TESTNET.id }); } catch {}
+    } catch (e: any) {
+      console.error(e);
+      alert(e?.shortMessage || e?.message || "Connect failed");
+    }
   };
 
   const onCheckAccess = async () => {
@@ -124,15 +143,16 @@ function AppInner() {
             <button
               key={c.id}
               onClick={() => onConnect(c.id)}
-              disabled={!c.ready || connectStatus === "pending"}
+              disabled={connectStatus === "pending"}
               style={{ padding: "10px 14px", borderRadius: 14, background: "#222" }}
             >
               {c.name === "Injected" ? "MetaMask / Browser" : c.name}
             </button>
           ))}
-          {WC_ID && (
+          {!!WC_ID && (
             <div style={{ fontSize: 12, opacity: 0.6, width: "100%" }}>
-              WalletConnect работает. QR-модалку добавим на следующем шаге (Reown AppKit).
+              WalletConnect работает. Для Phantom/других мобильных кошельков открой сайт в их встроенном браузере
+              и нажми WalletConnect. (QR добавим позже)
             </div>
           )}
         </div>
