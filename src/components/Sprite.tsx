@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+/** Simple frame-by-frame sprite player */
 export default function Sprite({
   frames,
   fps = 8,
