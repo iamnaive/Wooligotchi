@@ -9,13 +9,13 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@tanstack/react-query": "5.56.0",
-    "@walletconnect/modal": "2.7.2",
-    "react": "18.3.1",
-    "react-dom": "18.3.1",
-    "viem": "2.9.20",
-    "wagmi": "2.12.14"
-  },
+  "@tanstack/react-query": "5.56.0",
+  "@walletconnect/modal": "2.6.2",
+  "react": "18.3.1",
+  "react-dom": "18.3.1",
+  "viem": "2.9.20",
+  "wagmi": "2.12.14"
+}
   "devDependencies": {
     "@types/react": "18.2.73",
     "@types/react-dom": "18.2.24",
