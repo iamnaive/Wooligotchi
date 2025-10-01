@@ -1,31 +1,40 @@
 import React, { useState } from "react";
 import {
-  http, createConfig, WagmiConfig,
-  useAccount, useConnect, useDisconnect,
-  useReadContract, useWriteContract, useSwitchChain,
+  http,
+  createConfig,
+  WagmiProvider,         // ✅ use WagmiProvider in wagmi v2
+  useAccount,
+  useConnect,
+  useDisconnect,
+  useReadContract,
+  useWriteContract,
+  useSwitchChain,
 } from "wagmi";
 import { injected } from "wagmi/connectors";
 import { defineChain } from "viem";
 
-// Safe reads of envs (show UI even if пусто)
+// -------- Env (с безопасными дефолтами) --------
 const CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 const RPC_URL = String(import.meta.env.VITE_RPC_URL ?? "https://testnet-rpc.monad.xyz");
 const NFT_ADDRESS_RAW = (import.meta.env.VITE_NFT_ADDRESS ?? "") as string;
 const NFT_ADDRESS = (NFT_ADDRESS_RAW.startsWith("0x") ? NFT_ADDRESS_RAW : "") as `0x${string}`;
 
-const MONAD = defineChain({
+// -------- Monad testnet chain --------
+const MONAD_TESTNET = defineChain({
   id: CHAIN_ID,
   name: "Monad Testnet",
   nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
   rpcUrls: { default: { http: [RPC_URL] } },
 });
 
+// Wagmi config
 const config = createConfig({
-  chains: [MONAD],
+  chains: [MONAD_TESTNET],
   connectors: [injected()],
-  transports: { [MONAD.id]: http(RPC_URL) },
+  transports: { [MONAD_TESTNET.id]: http(RPC_URL) },
 });
 
+// Minimal ERC-721 ABI
 const ERC721_ABI = [
   { type: "function", name: "balanceOf", stateMutability: "view",
     inputs: [{ name: "owner", type: "address" }], outputs: [{ type: "uint256" }] },
@@ -44,7 +53,6 @@ function AppInner() {
   const [hasAccess, setHasAccess] = useState<null | boolean>(null);
   const [tokenIdToBurn, setTokenIdToBurn] = useState("");
 
-  const canQuery = Boolean(NFT_ADDRESS);
   const { refetch: refetchBalance, isFetching } = useReadContract({
     address: (NFT_ADDRESS || "0x0000000000000000000000000000000000000000") as `0x${string}`,
     abi: ERC721_ABI,
@@ -57,18 +65,18 @@ function AppInner() {
 
   const onConnect = async () => {
     await connect({ connector: connectors.find(c => c.id === "injected") || connectors[0] });
-    try { await switchChain({ chainId: MONAD.id }); } catch {}
+    try { await switchChain({ chainId: MONAD_TESTNET.id }); } catch {}
   };
 
   const onCheckAccess = async () => {
-    if (!canQuery) return alert("Set VITE_NFT_ADDRESS in Environment Variables.");
+    if (!NFT_ADDRESS) return alert("Set VITE_NFT_ADDRESS in Vercel → Environment Variables");
     const res = await refetchBalance();
     const v = res.data ? BigInt(res.data as any) : 0n;
     setHasAccess(v > 0n);
   };
 
   const onBurn = async () => {
-    if (!canQuery) return alert("Set VITE_NFT_ADDRESS first.");
+    if (!NFT_ADDRESS) return alert("Set VITE_NFT_ADDRESS first");
     if (!tokenIdToBurn) return alert("Enter tokenId");
     try {
       await writeContractAsync({
@@ -76,9 +84,9 @@ function AppInner() {
         abi: ERC721_ABI,
         functionName: "burn",
         args: [BigInt(tokenIdToBurn)],
-        chainId: MONAD.id,
+        chainId: MONAD_TESTNET.id,
       });
-      alert("Burn tx sent. After confirm, press Check Access.");
+      alert("Burn tx sent. After confirm, press Check Access again.");
     } catch (e: any) {
       console.error(e);
       alert(e?.shortMessage || e?.message || "Burn failed");
@@ -105,7 +113,7 @@ function AppInner() {
       <div style={{ marginTop: 24, background: "#111", padding: 16, borderRadius: 16, maxWidth: 560 }}>
         <h2 style={{ marginTop: 0 }}>Token Gate</h2>
         <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>
-          Collection: {NFT_ADDRESS || "(set VITE_NFT_ADDRESS in Vercel → Environment Variables)"}
+          Collection: {NFT_ADDRESS || "(set VITE_NFT_ADDRESS in env)"}
         </div>
         <button onClick={onCheckAccess} disabled={!isConnected || isFetching} style={{ padding: "10px 14px", borderRadius: 12, background: "#222" }}>
           {isFetching ? "Checking…" : "Check Access"}
@@ -135,8 +143,8 @@ function AppInner() {
 
 export default function App() {
   return (
-    <WagmiConfig config={config}>
+    <WagmiProvider config={config}>
       <AppInner />
-    </WagmiConfig>
+    </WagmiProvider>
   );
 }
