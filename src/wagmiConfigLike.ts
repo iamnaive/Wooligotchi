@@ -1,5 +1,6 @@
-// Local config for core actions when we are outside React hooks.
-// Keeps it consistent with your main setup. Comments in English only.
+// src/wagmiConfigLike.ts
+// Standalone config for viem/wagmi core actions. Comments in English only.
+
 import { createConfig, http } from "wagmi";
 import { defineChain } from "viem";
 
