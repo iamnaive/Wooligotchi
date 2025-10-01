@@ -4,8 +4,6 @@ import App from "./App";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 console.log("[WoollyGotchi] boot");
-
-// TanStack Query client required by wagmi v2
 const queryClient = new QueryClient();
 
 const el = document.getElementById("root");
