@@ -13,10 +13,10 @@ import {
 import { injected, walletConnect, coinbaseWallet } from "wagmi/connectors";
 import { defineChain } from "viem";
 import VaultPanel from "./components/VaultPanel";
-import "./styles.css";
 import Tamagotchi from "./components/Tamagotchi";
 import { GameProvider } from "./game/useGame";
 import { PetConfig } from "./game/types";
+import "./styles.css";
 
 /* ===== ENV ===== */
 const MONAD_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
@@ -79,6 +79,23 @@ function short(addr?: `0x${string}`) {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
+/* ===== TEMP PET CONFIG (заменишь кадры на свои) ===== */
+const petConfig: PetConfig = {
+  name: "Tamagotchi",
+  fps: 8,
+  anims: {
+    idle:  ["/sprites/idle_1.png","/sprites/idle_2.png","/sprites/idle_3.png"],
+    eat:   ["/sprites/eat_1.png","/sprites/eat_2.png"],
+    play:  ["/sprites/play_1.png","/sprites/play_2.png","/sprites/play_3.png"],
+    sleep: ["/sprites/sleep_1.png","/sprites/sleep_2.png"],
+    sick:  ["/sprites/sick_1.png","/sprites/sick_2.png"],
+    poop:  ["/sprites/poop_1.png","/sprites/poop_2.png"],
+    clean: ["/sprites/clean_1.png","/sprites/clean_2.png"],
+    die:   ["/sprites/die_1.png","/sprites/die_2.png","/sprites/die_3.png"],
+  }
+};
+
+/* ===== WALLET PICKER MODAL ===== */
 function WalletPicker({
   open,
   onClose,
@@ -111,7 +128,7 @@ function WalletPicker({
           ))}
         </div>
         <div className="helper" style={{ marginTop: 10 }}>
-          WalletConnect opens a QR for mobile wallets (Phantom, Rainbow, OKX, etc.).
+          WalletConnect открывает QR для мобильных кошельков (Phantom, Rainbow, OKX и т.д.).
         </div>
         <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
           <button onClick={onClose} className="btn">Close</button>
@@ -121,6 +138,7 @@ function WalletPicker({
   );
 }
 
+/* ===== MAIN APP CONTENT ===== */
 function AppInner() {
   const { address, isConnected, status } = useAccount();
   const chainId = useChainId();
@@ -168,9 +186,10 @@ function AppInner() {
 
   return (
     <div className="page">
+      {/* Topbar */}
       <header className="topbar">
         <div className="brand">
-          <div className="logo">🐑</div>
+          <div className="logo">🐣</div>
           <div className="title">WoollyGotchi <span className="muted">(Monad testnet)</span></div>
         </div>
 
@@ -192,7 +211,13 @@ function AppInner() {
         )}
       </header>
 
+      {/* Vault panel (обмен 1 NFT -> 1 жизнь) */}
       <VaultPanel />
+
+      {/* Игра Тамагочи */}
+      <GameProvider config={petConfig}>
+        <Tamagotchi />
+      </GameProvider>
 
       <footer className="foot">
         <span className="muted">Status: {status}</span>
@@ -209,6 +234,7 @@ function AppInner() {
   );
 }
 
+/* ===== ROOT ===== */
 export default function App() {
   return (
     <WagmiProvider config={config}>
