@@ -1,121 +1,156 @@
-/* ---------- Design tokens ---------- */
-:root {
-  --bg: #06070d;
-  --card: #0c0f18;
-  --card-2: #0f1320;
-  --text: #f3f5ff;
-  --muted: #b3b8d4;
-  --accent: #7c4dff;         /* primary accent */
-  --accent-2: #4dd2ff;       /* secondary accent */
-  --ring: rgba(124, 77, 255, 0.55);
-  --shadow: 0 8px 30px rgba(0, 0, 0, 0.55);
-  --radius: 16px;
+/* ------- Base: dark gradient + Inter ------- */
+:root{
+  --bg0:#08090e;
+  --bg1:#0d0f17cc;
+  --card:#0f1320cc;
+  --muted:#a1a1b0;
+  --text:#e8e8f2;
+  --primary:#7c4dff;
+  --primary-2:#a48bff;
+  --border:#1f2435;
+  --ok:#3bd671;
+  --warn:#ffcf5a;
+  --err:#ff6b6b;
+  --radius:14px;
+  --shadow: 0 10px 30px rgba(0,0,0,.35), 0 1px 0 rgba(255,255,255,.03) inset;
 }
 
-/* ---------- Global ---------- */
-* { box-sizing: border-box; }
-html, body, #root { height: 100%; }
-body {
-  margin: 0;
-  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-  color: var(--text);
+*{box-sizing:border-box}
+html,body,#root{height:100%}
+html,body{
   background:
-    radial-gradient(1000px 600px at 10% -10%, rgba(124,77,255,0.12), transparent 60%),
-    radial-gradient(900px 540px at 90% -10%, rgba(77,210,255,0.12), transparent 60%),
-    var(--bg);
+    radial-gradient(1200px 800px at 85% -10%, #3a2b89 0%, transparent 60%),
+    radial-gradient(800px 600px at 10% 110%, #0c5a70 0%, transparent 60%),
+    linear-gradient(180deg, #090b12, #0a0c14);
+  color:var(--text);
+  font: 14px/1.45 "Inter", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  margin:0;
+  letter-spacing:.1px;
 }
 
-/* ---------- Layout ---------- */
-.container {
-  max-width: 1040px;
-  margin: 0 auto;
-  padding: 32px 20px 64px;
+/* ------- Layout ------- */
+.page{
+  min-height:100%;
+  padding:28px clamp(16px, 3vw, 40px);
+  display:flex;
+  flex-direction:column;
+  gap:22px;
 }
-.header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
+.topbar{
+  display:flex; align-items:center; justify-content:space-between;
+  gap:14px;
 }
-.title {
-  font-size: clamp(26px, 3vw, 36px);
-  font-weight: 700;
-  letter-spacing: 0.2px;
+.title{
+  font-weight:800; font-size: clamp(22px, 3.4vw, 34px);
+  letter-spacing:.3px;
+  text-shadow: 0 0 30px rgba(124,77,255,.25);
 }
 
-/* ---------- Card ---------- */
-.card {
-  background: linear-gradient(180deg, var(--card), var(--card-2));
-  border: 1px solid rgba(255, 255, 255, 0.06);
+/* ------- Wallet summary ------- */
+.walletRow{
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+}
+.pill{
+  padding:6px 10px; border-radius:999px;
+  background:linear-gradient(180deg, #111523, #0f1426);
+  border:1px solid var(--border); box-shadow:var(--shadow);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+.muted{ color:var(--muted); }
+
+/* ------- Cards / sections ------- */
+.card{
+  background: var(--card);
+  backdrop-filter: blur(8px);
+  border:1px solid var(--border);
   border-radius: var(--radius);
-  padding: 20px;
   box-shadow: var(--shadow);
-  backdrop-filter: blur(6px);
+  padding:16px;
 }
-.card + .card { margin-top: 16px; }
-.card-title {
-  margin: 0 0 12px;
-  font-size: 18px;
-  font-weight: 700;
-}
-.helper {
-  font-size: 12px;
-  color: var(--muted);
+.card + .card{ margin-top:12px; }
+.card-title{
+  font-size:16px; font-weight:700; margin:0 0 10px 0;
 }
 
-/* ---------- Buttons ---------- */
-.btn {
-  appearance: none;
-  border: 0;
-  color: var(--text);
-  background: #171a26;
-  padding: 10px 14px;
-  border-radius: 12px;
-  font-weight: 600;
-  transition: transform .08s ease, box-shadow .15s ease, background .15s ease, border-color .15s ease;
-  border: 1px solid rgba(255,255,255,0.06);
+/* ------- Buttons ------- */
+.btn{
+  border:1px solid var(--border);
+  background: linear-gradient(180deg, #151a2c, #0f1426);
+  color:var(--text);
+  padding:10px 14px; border-radius:12px; cursor:pointer;
+  transition: transform .08s ease, box-shadow .18s ease, border-color .18s ease, background .18s ease;
+  box-shadow: var(--shadow);
 }
-.btn:hover { transform: translateY(-1px); }
-.btn:active { transform: translateY(0); }
+.btn:hover{ transform: translateY(-1px); border-color:#2b3350; }
+.btn:active{ transform: translateY(0); }
+.btn:disabled{ opacity:.55; cursor:not-allowed; }
 
-.btn-primary {
-  background: linear-gradient(180deg, var(--accent), #5a30ff);
-  box-shadow: 0 8px 24px rgba(124,77,255,0.35);
-  border-color: rgba(124,77,255,0.5);
+.btn-primary{
+  border-color:transparent;
+  background: linear-gradient(180deg, var(--primary), #5b32e8);
+  color:white; font-weight:700;
+  box-shadow: 0 12px 30px rgba(124,77,255,.35);
 }
-.btn-primary:hover { box-shadow: 0 10px 26px rgba(124,77,255,0.45); }
-
-.btn-ghost {
-  background: #121523;
+.btn-primary:hover{ box-shadow: 0 16px 38px rgba(124,77,255,.45); }
+.btn.ghost{
+  background:transparent; border-color:#2a2f46; color:var(--muted);
 }
-
-.btn:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-  transform: none;
-  box-shadow: none;
+.btn-ghost{
+  background:linear-gradient(180deg, #12172a, #0e1426);
+  border:1px solid #232846;
 }
-
-/* ---------- Inputs ---------- */
-.input {
-  width: 100%;
-  color: var(--text);
-  background: #0f1220;
-  border: 1px solid rgba(255,255,255,0.06);
-  border-radius: 12px;
-  padding: 12px 14px;
-  outline: none;
-  transition: border-color .15s ease, box-shadow .15s ease;
+.btn-danger{
+  background: linear-gradient(180deg, #ff6b6b, #e04646);
+  border-color:transparent; color:white;
 }
-.input::placeholder { color: #7b81a1; }
-.input:focus {
-  border-color: var(--ring);
-  box-shadow: 0 0 0 4px rgba(124,77,255,.14);
+.btn-success{
+  background: linear-gradient(180deg, #3bd671, #25b55a);
+  border-color:transparent; color:#04130a;
 }
 
-/* ---------- Grid for wallet buttons ---------- */
-.wallet-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
+/* ------- Inputs ------- */
+.input{
+  width:100%; background:#0e1325; color:var(--text);
+  border:1px solid var(--border); border-radius:12px;
+  padding:10px 12px; outline:none;
+  box-shadow: var(--shadow);
 }
+.input::placeholder{ color:#6b708a; }
+.input:focus{ border-color:#33406a; }
+
+/* ------- Wallet modal ------- */
+.wallet-grid{
+  display:grid; grid-template-columns:1fr; gap:10px;
+}
+@media (min-width:520px){
+  .wallet-grid{ grid-template-columns:1fr; }
+}
+.helper{ color:var(--muted); font-size:12px; }
+
+/* modal layer reused by WalletPicker wrapper styles */
+.modal{
+  position: fixed; inset:0; display:flex; align-items:center; justify-content:center;
+  background: rgba(0,0,0,.45); z-index:9999;
+}
+
+/* ------- Log area ------- */
+pre{
+  margin:0; white-space:pre-wrap; word-break:break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+.log{
+  background:#0c1122; border:1px solid #1b2340; border-radius:12px;
+  padding:12px; color:#dfe3ff; font-size:12px;
+  box-shadow: var(--shadow);
+}
+.log .ok{ color:var(--ok); }
+.log .warn{ color:var(--warn); }
+.log .err{ color:var(--err); }
+
+/* ------- Footer ------- */
+.foot{ color:var(--muted); font-size:12px; }
+
+/* Small utility spacing */
+.mt-2{margin-top:8px} .mt-3{margin-top:12px} .mt-6{margin-top:24px}
+.max-w-3xl{max-width:960px} .mx-auto{margin-inline:auto}
+.rounded-2xl{border-radius:18px}
