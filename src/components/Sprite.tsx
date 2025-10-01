@@ -14,12 +14,14 @@ export default function Sprite({
   style?: React.CSSProperties;
 }) {
   const [i, setI] = useState(0);
+  const [err, setErr] = useState(false);
   const timer = useRef<any>();
 
   useEffect(() => {
     clearInterval(timer.current);
     setI(0);
-    if (!frames.length) return;
+    setErr(false);
+    if (!frames?.length) return;
     timer.current = setInterval(() => {
       setI((prev) => {
         const next = prev + 1;
@@ -35,12 +37,40 @@ export default function Sprite({
     return () => clearInterval(timer.current);
   }, [frames, fps, loop]);
 
-  if (!frames.length) return null;
+  const boxStyle: React.CSSProperties = {
+    imageRendering: "pixelated",
+    width: 160, height: 160,
+    display: "block",
+    background: "#0f1426",
+    border: "1px solid #232846",
+    borderRadius: 16,
+    ...style,
+  };
+
+  if (!frames || frames.length === 0) {
+    return (
+      <div style={{...boxStyle, display:"grid", placeItems:"center", color:"#a3a7be", fontSize:12}}>
+        no frames
+      </div>
+    );
+  }
+
+  const src = frames[i];
+
+  if (err) {
+    return (
+      <div style={{...boxStyle, display:"grid", placeItems:"center", color:"#ff6b74", fontSize:12}}>
+        failed: {src}
+      </div>
+    );
+  }
+
   return (
     <img
-      src={frames[i]}
+      src={src}
       alt=""
-      style={{ imageRendering: "pixelated", width: 160, height: 160, ...style }}
+      style={boxStyle}
+      onError={() => setErr(true)}
     />
   );
 }
