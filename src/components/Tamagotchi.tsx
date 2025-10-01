@@ -2,10 +2,14 @@ import React, { useMemo } from "react";
 import { useAccount } from "wagmi";
 import Sprite from "./Sprite";
 import { useGame, useReviveWithLife } from "../game/useGame";
-import { PetConfig } from "../game/types";
 
 const MONAD_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 
+/** Tamagotchi scene composed of:
+ *  - .avatar (purple frame): static portrait/sprite
+ *  - .stage  (red frame): background area for walk cycles
+ *  - .hud    (yellow frame): actions and status bars
+ */
 export default function Tamagotchi() {
   const { address } = useAccount();
   const { state, dispatch, config } = useGame();
@@ -25,75 +29,73 @@ export default function Tamagotchi() {
     }
   }, [state.activeAnim, config]);
 
-  const stat = (label: string, v: number) => (
-    <div style={{ display: "grid", gap: 6 }}>
-      <div className="muted" style={{ fontSize: 12 }}>{label}</div>
-      <div style={{
-        height: 8, borderRadius: 999, background: "#14192e",
-        border: "1px solid #222846", overflow: "hidden"
-      }}>
-        <div style={{
-          width: `${Math.max(0, Math.min(100, v))}%`,
-          height: "100%",
-          background: `linear-gradient(90deg,#7c4dff,#22b35b)`,
-          boxShadow: "0 0 10px rgba(124,77,255,.35) inset"
-        }} />
+  const Stat = ({ label, v }: { label:string; v:number }) => (
+    <div className="stat">
+      <div className="stat-label">{label}</div>
+      <div className="stat-bar">
+        <div className="stat-fill" style={{width:`${Math.max(0, Math.min(100, v))}%`}} />
       </div>
     </div>
   );
 
   return (
-    <section className="card" style={{ marginTop: 12 }}>
-      <div className="card-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span>{config.name}</span>
-        <span className="pill">{state.pet.toUpperCase()}</span>
-      </div>
+    <section className="game-shell">
+      <div className="card-title">Tamagotchi</div>
 
-      <div style={{
-        display: "grid", gridTemplateColumns: "160px 1fr", gap: 16, alignItems: "center"
-      }}>
-        <div style={{
-          display: "grid", placeItems: "center",
-          borderRadius: 16, background: "linear-gradient(180deg,#12172a,#0e1426)",
-          border: "1px solid #232846", height: 200
-        }}>
-          <Sprite frames={frames} fps={config.fps ?? 8} loop={state.pet !== "dead"} />
+      <div className="game-grid">
+        {/* Avatar (purple) */}
+        <div className="avatar">
+          <Sprite frames={config.anims.idle} fps={config.fps ?? 8} loop />
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          {stat("Hunger", state.needs.hunger)}
-          {stat("Hygiene", state.needs.hygiene)}
-          {stat("Fun", state.needs.fun)}
-          {stat("Energy", state.needs.energy)}
-          {stat("Health", state.needs.health)}
-          <div style={{ display: "grid", alignContent: "end" }}>
-            {state.hasPoop ? <span className="pill">💩 Needs cleaning</span> : <span className="muted">All clean</span>}
+        {/* Stage (red) — place walking/background here later */}
+        <div className="stage">
+          {/* Placeholder for future walking animation */}
+          <div style={{
+            position:"absolute", inset:0, display:"grid", placeItems:"center",
+            color:"#a3a7be", fontSize:12
+          }}>
+            Stage / background (character will walk here)
           </div>
         </div>
-      </div>
 
-      {state.pet !== "dead" ? (
-        <div className="mt-3" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-          <button className="btn" onClick={() => dispatch({ type: "DO", do: "feed" })}>🍗 Feed</button>
-          <button className="btn" onClick={() => dispatch({ type: "DO", do: "play" })}>🎮 Play</button>
-          <button className="btn" onClick={() => dispatch({ type: "DO", do: "sleep" })}>
-            {state.pet === "sleeping" ? "🌞 Wake" : "😴 Sleep"}
-          </button>
-          <button className="btn" onClick={() => dispatch({ type: "DO", do: "clean" })}>🧼 Clean</button>
-          <button className="btn" onClick={() => dispatch({ type: "DO", do: "heal" })}>💊 Heal</button>
-        </div>
-      ) : (
-        <div className="mt-3" style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <span className="muted">Your pet has passed away…</span>
-          {can ? (
-            <button className="btn btn-primary" onClick={() => {
-              if (revive()) dispatch({ type: "REVIVE" });
-            }}>❤️ Revive (–1 life)</button>
+        {/* HUD (yellow) */}
+        <div className="hud">
+          <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:12}}>
+            <Stat label="Hunger"  v={state.needs.hunger} />
+            <Stat label="Hygiene" v={state.needs.hygiene} />
+            <Stat label="Fun"     v={state.needs.fun} />
+            <Stat label="Energy"  v={state.needs.energy} />
+            <Stat label="Health"  v={state.needs.health} />
+            <div style={{ display:"grid", alignContent:"end" }}>
+              {state.hasPoop ? <span className="pill">💩 Needs cleaning</span> : <span className="muted">All clean</span>}
+            </div>
+          </div>
+
+          {state.pet !== "dead" ? (
+            <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+              <button className="btn" onClick={() => dispatch({ type: "DO", do: "feed" })}>🍗 Feed</button>
+              <button className="btn" onClick={() => dispatch({ type: "DO", do: "play" })}>🎮 Play</button>
+              <button className="btn" onClick={() => dispatch({ type: "DO", do: "sleep" })}>
+                {state.pet === "sleeping" ? "🌞 Wake" : "😴 Sleep"}
+              </button>
+              <button className="btn" onClick={() => dispatch({ type: "DO", do: "clean" })}>🧼 Clean</button>
+              <button className="btn" onClick={() => dispatch({ type: "DO", do: "heal" })}>💊 Heal</button>
+            </div>
           ) : (
-            <span className="pill">No lives left</span>
+            <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+              <span className="muted">Your pet has passed away…</span>
+              {can ? (
+                <button className="btn btn-primary" onClick={() => {
+                  if (revive()) dispatch({ type: "REVIVE" });
+                }}>❤️ Revive (–1 life)</button>
+              ) : (
+                <span className="pill">No lives left</span>
+              )}
+            </div>
           )}
         </div>
-      )}
+      </div>
     </section>
   );
 }
