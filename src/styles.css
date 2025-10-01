@@ -33,9 +33,7 @@ html,body{
 /* ===== Layout ===== */
 .page{ min-height:100%; padding:28px clamp(16px,3vw,40px); display:flex; flex-direction:column; gap:22px; }
 .topbar{ display:flex; align-items:center; justify-content:space-between; gap:14px; }
-.brand{
-  display:flex; align-items:center; gap:12px;
-}
+.brand{ display:flex; align-items:center; gap:12px; }
 .logo{
   width:38px; height:38px; border-radius:12px;
   display:grid; place-items:center; font-size:22px;
@@ -83,7 +81,6 @@ html,body{
 .btn:hover{ transform: translateY(-1px); border-color:#2b3350; filter: saturate(1.08); }
 .btn:active{ transform: translateY(0); }
 .btn:disabled{ opacity:.55; cursor:not-allowed; }
-
 .btn-primary{
   border-color:transparent;
   background:
