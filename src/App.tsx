@@ -13,14 +13,14 @@ import {
 import { injected, walletConnect, coinbaseWallet } from "wagmi/connectors";
 import { defineChain } from "viem";
 
-// ---------- ENV ----------
+/** ---------- ENV ---------- */
 const CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 const RPC_URL = String(import.meta.env.VITE_RPC_URL ?? "https://testnet-rpc.monad.xyz");
 const NFT_ADDRESS_RAW = (import.meta.env.VITE_NFT_ADDRESS ?? "") as string;
 const NFT_ADDRESS = (NFT_ADDRESS_RAW.startsWith("0x") ? NFT_ADDRESS_RAW : "") as `0x${string}`;
 const WC_ID = String(import.meta.env.VITE_WALLETCONNECT_PROJECT_ID ?? "");
 
-// ---------- CHAIN ----------
+/** ---------- CHAIN ---------- */
 const MONAD_TESTNET = defineChain({
   id: CHAIN_ID,
   name: "Monad Testnet",
@@ -28,14 +28,17 @@ const MONAD_TESTNET = defineChain({
   rpcUrls: { default: { http: [RPC_URL] } },
 });
 
-// ---------- CONNECTORS ----------
-// ВКЛЮЧАЕМ QR-модалку WalletConnect (рабочая стабильная версия пакета).
-const baseConnectors = [
+/** ---------- CONNECTORS ----------
+ * Injected: MetaMask, Phantom (EVM), OKX, etc.
+ * WalletConnect: QR modal enabled (stable version).
+ * Coinbase Wallet: desktop/mobile app.
+ */
+const connectorsList = [
   injected(),
   WC_ID
     ? walletConnect({
         projectId: WC_ID,
-        showQrModal: true, // ← теперь при клике откроется QR
+        showQrModal: true, // will open the QR modal
         metadata: {
           name: "WoollyGotchi",
           description: "Tamagotchi mini-app on Monad testnet",
@@ -47,21 +50,39 @@ const baseConnectors = [
   coinbaseWallet({ appName: "WoollyGotchi" }),
 ].filter(Boolean);
 
-// ---------- WAGMI CONFIG ----------
+/** ---------- WAGMI CONFIG ---------- */
 const config = createConfig({
   chains: [MONAD_TESTNET],
-  connectors: baseConnectors as any,
+  connectors: connectorsList as any,
   transports: { [MONAD_TESTNET.id]: http(RPC_URL) },
 });
 
-// ---------- MINIMAL ERC721 ABI ----------
+/** ---------- MINIMAL ERC-721 ABI ---------- */
 const ERC721_ABI = [
-  { type: "function", name: "balanceOf", stateMutability: "view", inputs: [{ name: "owner", type: "address" }], outputs: [{ type: "uint256" }] },
-  { type: "function", name: "ownerOf", stateMutability: "view", inputs: [{ name: "tokenId", type: "uint256" }], outputs: [{ type: "address" }] },
-  { type: "function", name: "burn", stateMutability: "nonpayable", inputs: [{ name: "tokenId", type: "uint256" }], outputs: [] },
+  {
+    type: "function",
+    name: "balanceOf",
+    stateMutability: "view",
+    inputs: [{ name: "owner", type: "address" }],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "ownerOf",
+    stateMutability: "view",
+    inputs: [{ name: "tokenId", type: "uint256" }],
+    outputs: [{ type: "address" }],
+  },
+  {
+    type: "function",
+    name: "burn",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "tokenId", type: "uint256" }],
+    outputs: [],
+  },
 ] as const;
 
-// ---------- SIMPLE WALLET PICKER (overlay modal) ----------
+/** ---------- SIMPLE WALLET PICKER (overlay) ---------- */
 function WalletPicker({
   open,
   onClose,
@@ -121,7 +142,7 @@ function WalletPicker({
           ))}
         </div>
         <div style={{ marginTop: 12, fontSize: 12, opacity: 0.6 }}>
-          WalletConnect покажет QR для мобильных кошельков (Phantom, Rainbow, OKX и т.д.).
+          WalletConnect will show a QR for mobile wallets (Phantom, Rainbow, OKX, etc.).
         </div>
         <button
           onClick={onClose}
@@ -168,7 +189,7 @@ function AppInner() {
       const c = connectors.find((x) => x.id === connectorId);
       if (!c) return;
 
-      // Подсказка, если инжекта нет
+      // Helpful hint if no injected provider is present (common UX issue)
       if (c.id === "injected") {
         const hasProvider =
           typeof window !== "undefined" &&
@@ -177,7 +198,7 @@ function AppInner() {
             (window as any).coinbaseWalletExtension ||
             (window as any).phantom?.ethereum);
         if (!hasProvider) {
-          alert("Браузерный кошелёк не найден/не разрешён. Установи MetaMask/Phantom или используй WalletConnect (QR).");
+          alert("No browser wallet detected. Install/enable MetaMask/Phantom or use WalletConnect (QR).");
           return;
         }
       }
@@ -249,7 +270,9 @@ function AppInner() {
 
       <div style={{ marginTop: 24, background: "#111", padding: 16, borderRadius: 16, maxWidth: 560 }}>
         <h2 style={{ marginTop: 0 }}>Token Gate</h2>
-        <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>Collection: {NFT_ADDRESS || "(set VITE_NFT_ADDRESS in env)"}</div>
+        <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>
+          Collection: {NFT_ADDRESS || "(set VITE_NFT_ADDRESS in env)"}
+        </div>
         <button onClick={onCheckAccess} disabled={!isConnected || isFetching} style={{ padding: "10px 14px", borderRadius: 12, background: "#222" }}>
           {isFetching ? "Checking…" : "Check Access"}
         </button>
