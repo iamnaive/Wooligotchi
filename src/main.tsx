@@ -1,15 +1,16 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-// Simple boot log to verify bundle runs
 console.log("[WoollyGotchi] boot");
+const queryClient = new QueryClient();
 
 const el = document.getElementById("root");
-if (!el) {
-  const warn = document.createElement("div");
-  warn.textContent = "Root element not found.";
-  document.body.appendChild(warn);
-} else {
-  createRoot(el).render(React.createElement(App));
+if (el) {
+  createRoot(el).render(
+    <QueryClientProvider client={queryClient}>
+      <App />
+    </QueryClientProvider>
+  );
 }
