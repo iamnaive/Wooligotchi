@@ -1,7 +1,3 @@
-// src/App.tsx
-// WagmiProvider + connectors + auto switch/add chain + VaultPanel.
-// Comments in English only.
-
 import React, { useMemo, useState } from "react";
 import {
   http,
@@ -17,21 +13,19 @@ import {
 import { injected, walletConnect, coinbaseWallet } from "wagmi/connectors";
 import { defineChain } from "viem";
 import VaultPanel from "./components/VaultPanel";
+import "./styles.css";
 
 /* ===== ENV ===== */
 const MONAD_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 const RPC_URL = String(import.meta.env.VITE_RPC_URL ?? "https://testnet-rpc.monad.xyz");
 const WC_ID = String(import.meta.env.VITE_WALLETCONNECT_PROJECT_ID ?? "");
 
-/* ===== CHAIN (include blockExplorers + testnet flag for addChain) ===== */
+/* ===== CHAIN ===== */
 const MONAD = defineChain({
   id: MONAD_CHAIN_ID,
   name: "Monad Testnet",
   nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
   rpcUrls: { default: { http: [RPC_URL] } },
-  blockExplorers: {
-    default: { name: "Explorer", url: "https://explorer.monad.testnet" }, // placeholder ok
-  },
   testnet: true,
 });
 
@@ -97,20 +91,9 @@ function WalletPicker({
 }) {
   if (!open) return null;
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.6)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 9999,
-      }}
-    >
+    <div onClick={onClose} className="modal">
       <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: 460, maxWidth: "92vw" }}>
-        <div className="title" style={{ fontSize: 20, marginBottom: 10 }}>Connect a wallet</div>
+        <div className="title" style={{ fontSize: 20, marginBottom: 10, color: "white" }}>Connect a wallet</div>
         <div className="wallet-grid">
           {items.map((i) => (
             <button
@@ -125,7 +108,7 @@ function WalletPicker({
           ))}
         </div>
         <div className="helper" style={{ marginTop: 10 }}>
-          If Phantom doesn't switch, use MetaMask/OKX/Rabby or WalletConnect with a wallet that supports custom testnets.
+          WalletConnect opens a QR for mobile wallets (Phantom, Rainbow, OKX, etc.).
         </div>
         <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
           <button onClick={onClose} className="btn">Close</button>
@@ -135,7 +118,6 @@ function WalletPicker({
   );
 }
 
-/* ===== APP CONTENT ===== */
 function AppInner() {
   const { address, isConnected, status } = useAccount();
   const chainId = useChainId();
@@ -143,7 +125,6 @@ function AppInner() {
   const { disconnect } = useDisconnect();
   const { switchChain } = useSwitchChain();
   const { data: balance } = useBalance({ address, chainId, query: { enabled: !!address } });
-
   const [pickerOpen, setPickerOpen] = useState(false);
 
   const walletItems = useMemo(
@@ -168,20 +149,13 @@ function AppInner() {
             (window as any).coinbaseWalletExtension ||
             (window as any).phantom?.ethereum);
         if (!hasProvider) {
-          alert("No browser wallet detected. Install/enable MetaMask/Phantom or use WalletConnect (QR).");
+          alert("No browser wallet detected. Install MetaMask/Phantom or use WalletConnect (QR).");
           return;
         }
       }
 
       await connect({ connector: c });
-
-      // Try to switch/add chain
-      try {
-        await switchChain({ chainId: MONAD_CHAIN_ID });
-      } catch (e) {
-        console.warn("Chain switch/add failed (Phantom often can't add custom testnets)", e);
-      }
-
+      try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {}
       setPickerOpen(false);
     } catch (e: any) {
       console.error(e);
@@ -192,7 +166,10 @@ function AppInner() {
   return (
     <div className="page">
       <header className="topbar">
-        <div className="title">WoollyGotchi (Monad testnet)</div>
+        <div className="brand">
+          <div className="logo">🐑</div>
+          <div className="title">WoollyGotchi <span className="muted">(Monad testnet)</span></div>
+        </div>
 
         {!isConnected ? (
           <button className="btn btn-primary" onClick={() => setPickerOpen(true)}>
@@ -229,7 +206,6 @@ function AppInner() {
   );
 }
 
-/* ===== EXPORT ROOT ===== */
 export default function App() {
   return (
     <WagmiProvider config={config}>
