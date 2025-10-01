@@ -50,19 +50,19 @@ const connectorsList = [
           },
         },
         metadata: {
-          name: "WoollyGotchi",
-          description: "Tamagotchi mini-app on Monad testnet",
+          name: "Wooligotchi",
+          description: "Tamagotchi mini-app on Monad",
           url:
             typeof window !== "undefined"
               ? window.location.origin
               : "https://example.com",
           icons: [
-            "https://raw.githubusercontent.com/twitter/twemoji/master/assets/svg/1f999.svg",
+            "https://raw.githubusercontent.com/twitter/twemoji/master/assets/svg/1f423.svg",
           ],
         },
       })
     : null,
-  coinbaseWallet({ appName: "WoollyGotchi" }),
+  coinbaseWallet({ appName: "Wooligotchi" }),
 ].filter(Boolean);
 
 /* ===== WAGMI CONFIG ===== */
@@ -73,13 +73,13 @@ const config = createConfig({
   ssr: false,
 });
 
-/* ===== UI HELPERS ===== */
+/* ===== Helpers ===== */
 function short(addr?: `0x${string}`) {
   if (!addr) return "";
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
-/* ===== Lives gate helpers (same storage as VaultPanel) ===== */
+/* ===== Lives gate (local storage) ===== */
 const LIVES_KEY = "wg_lives_v1";
 const lKey = (cid:number, addr:string)=>`${cid}:${addr.toLowerCase()}`;
 function getLivesLocal(cid:number, addr?:`0x${string}`|null){
@@ -105,7 +105,7 @@ function useLivesGate(chainId:number, address?:`0x${string}`|null){
   return lives;
 }
 
-/* ===== TEMP PET CONFIG (заменишь пути на свои) ===== */
+/* ===== TEMP PET CONFIG (replace frames with your assets) ===== */
 const petConfig: PetConfig = {
   name: "Tamagotchi",
   fps: 8,
@@ -154,13 +154,26 @@ function WalletPicker({
           ))}
         </div>
         <div className="helper" style={{ marginTop: 10 }}>
-          WalletConnect открывает QR для мобильных кошельков (Phantom, Rainbow, OKX и т.д.).
+          WalletConnect opens a QR for mobile wallets (Phantom, Rainbow, OKX, etc.).
         </div>
         <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
           <button onClick={onClose} className="btn">Close</button>
         </div>
       </div>
     </div>
+  );
+}
+
+/* ===== SPLASH (start/gate) ===== */
+function Splash({ children }: { children?: React.ReactNode }) {
+  return (
+    <section className="card splash">
+      <div className="splash-inner">
+        <div className="splash-title">Wooligotchi</div>
+        <div className="muted">A tiny on-chain Tamagotchi</div>
+        {children}
+      </div>
+    </section>
   );
 }
 
@@ -217,7 +230,7 @@ function AppInner() {
       <header className="topbar">
         <div className="brand">
           <div className="logo">🐣</div>
-          <div className="title">WoollyGotchi <span className="muted">(Monad testnet)</span></div>
+          <div className="title">Wooligotchi</div>
         </div>
 
         {!isConnected ? (
@@ -238,23 +251,24 @@ function AppInner() {
         )}
       </header>
 
-      {/* Lives gate: если жизней нет — показываем только панель пополнения */}
-      {lives <= 0 ? (
-        <section className="card" style={{marginTop:12}}>
-          <div className="card-title">Play access</div>
-          <div className="muted" style={{marginBottom:10}}>
-            Чтобы играть, отправь 1 NFT из коллекции <span className="pill">0x88c7…8446</span> в наш Vault.
-            За каждую отправку: +1 жизнь. После подтверждения транзакции мини-игра разблокируется автоматически.
+      {/* Start / gate screens */}
+      {!isConnected ? (
+        <Splash>
+          <div style={{ display:"flex", justifyContent:"center", gap:12, marginTop:10 }}>
+            <button className="btn btn-primary btn-lg" onClick={()=>setPickerOpen(true)}>Connect wallet</button>
           </div>
-          <VaultPanel />
-        </section>
+        </Splash>
+      ) : lives <= 0 ? (
+        <Splash>
+          <div className="muted">Send 1 NFT → get 1 life</div>
+          {/* Minimal CTA (single big button) */}
+          <VaultPanel mode="cta" />
+        </Splash>
       ) : (
-        <>
-          <GameProvider config={petConfig}>
-            <Tamagotchi />
-          </GameProvider>
-          {/* опционально: <VaultPanel /> ниже, чтобы докидывать жизни не выходя из игры */}
-        </>
+        /* Game visible only when user has lives */
+        <GameProvider config={petConfig}>
+          <Tamagotchi />
+        </GameProvider>
       )}
 
       <footer className="foot">
