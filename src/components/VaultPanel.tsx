@@ -1,11 +1,3 @@
-// src/components/VaultPanel.tsx
-// Fast auto-pick with caching + persistent lives.
-// 1) Try cached tokenId first (instant pop-up).
-// 2) Quick balanceOf(address) -> if 0, skip scan.
-// 3) Batched probes if needed.
-// 4) Wait receipt -> add life + persist.
-// Comments in English only.
-
 'use client';
 
 import { useEffect, useMemo, useState } from "react";
@@ -19,12 +11,12 @@ const ALLOWED_CONTRACT = "0x88c78d5852f45935324c6d100052958f694e8446";
 const VAULT = (import.meta.env.VITE_VAULT_ADDRESS as string) || zeroAddress;
 
 /* ---- Probe tuning ---- */
-const SMALL_FIRST_RANGE = 64;      // quick pass: 0..64
-const MAX_ERC721_PROBES = 400;     // overall ownerOf calls cap
-const MAX_ERC1155_PROBES = 400;    // overall balanceOf calls cap
-const DEFAULT_TOP_GUESS  = 10_000; // fallback upper bound if no totalSupply
-const BATCH_SIZE         = 24;     // parallel calls per batch
-const YIELD_EVERY        = 6;      // yield to UI every N batches
+const SMALL_FIRST_RANGE = 64;
+const MAX_ERC721_PROBES = 400;
+const MAX_ERC1155_PROBES = 400;
+const DEFAULT_TOP_GUESS  = 10_000;
+const BATCH_SIZE         = 24;
+const YIELD_EVERY        = 6;
 
 /* ===== ABIs ===== */
 const ERC165_ABI = [
@@ -67,7 +59,7 @@ const ERC1155_ABI = [
 
 /* ===== Local persistence ===== */
 const LIVES_KEY = "wg_lives_v1";
-const LASTID_KEY = "wg_last_token_v1"; // stores { "<chain>:<addr>:<contract>:<std>": string(tokenId) }
+const LASTID_KEY = "wg_last_token_v1"; // { "<chain>:<addr>:<contract>:<std>": tokenId }
 
 const livesKey = (cid:number, addr:string)=>`${cid}:${addr.toLowerCase()}`;
 const lastIdKey = (cid:number, addr:string, contract:string, std:"ERC721"|"ERC1155") =>
@@ -122,10 +114,7 @@ export default function VaultPanel() {
   function append(s: string) { setLog((p) => (p ? p + "\n" : "") + s); }
   const canSend = isConnected && VAULT !== zeroAddress;
 
-  // pick up lives when address appears/changes (persisted)
-  useEffect(() => {
-    if (address) setLives(getLives(MONAD_CHAIN_ID, address));
-  }, [address]);
+  useEffect(() => { if (address) setLives(getLives(MONAD_CHAIN_ID, address)); }, [address]);
 
   // detect standard on Monad once
   useEffect(() => {
@@ -154,7 +143,7 @@ export default function VaultPanel() {
   }, []);
 
   async function ensureMonad() {
-    try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {/* Phantom may ignore; it's fine */ }
+    try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {}
   }
 
   /* ---------- Utils ---------- */
@@ -245,23 +234,21 @@ export default function VaultPanel() {
   /* ---------- Auto-pick with cache ---------- */
 
   async function pickAnyErc721(user: `0x${string}`): Promise<bigint | null> {
-    // 0) cached id (instant)
+    // cached id (instant)
     const cached = getCachedId(MONAD_CHAIN_ID, user, ALLOWED_CONTRACT, "ERC721");
     if (cached !== null) {
       const owner = await ownerOfSafe(Number(cached));
       if (owner && owner.toLowerCase() === user.toLowerCase()) return cached;
     }
 
-    // 1) quick exit: balanceOf(address) === 0 => no scan
     if ((await balance721Of(user)) === 0n) return null;
 
-    // 2) enumerable fast path
     const idEnum = await tryEnumerableFirst(user);
     if (idEnum !== null) return idEnum;
 
     let probes = 0;
 
-    // 3) small ids 0..SMALL_FIRST_RANGE
+    // small ids
     {
       const batches = chunkify(0, SMALL_FIRST_RANGE);
       for (let b = 0; b < batches.length; b++) {
@@ -273,7 +260,7 @@ export default function VaultPanel() {
       }
     }
 
-    // 4) descending from totalSupply/guess
+    // descending from totalSupply/guess
     const topGuess = (await readTotalSupplyGuess()) ?? DEFAULT_TOP_GUESS;
     {
       const batches = chunkify(topGuess - 1, Math.max(0, topGuess - MAX_ERC721_PROBES), -1);
@@ -290,7 +277,6 @@ export default function VaultPanel() {
   }
 
   async function pickAnyErc1155(user: `0x${string}`): Promise<bigint | null> {
-    // cached id (instant)
     const cached = getCachedId(MONAD_CHAIN_ID, user, ALLOWED_CONTRACT, "ERC1155");
     if (cached !== null) {
       const bal = await balance1155Safe(user, Number(cached));
@@ -330,16 +316,15 @@ export default function VaultPanel() {
     return null;
   }
 
-  /* ---------- Main actions (with receipt & lives & cache) ---------- */
+  /* ---------- Main actions (receipt + lives + cache) ---------- */
 
   async function sendOne() {
     if (!isConnected || VAULT === zeroAddress || !address) return;
     setBusy(true); setLog("");
 
     try {
-      await ensureMonad(); // try switch; reads are pinned to chainId anyway
+      try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {}
 
-      // prefer 721 first (or unknown)
       if (std === "ERC721" || std === "UNKNOWN") {
         const id = await pickAnyErc721(address as `0x${string}`);
         if (id !== null) {
@@ -356,7 +341,7 @@ export default function VaultPanel() {
           const pc = getPublicClient(cfg, { chainId: MONAD_CHAIN_ID });
           const receipt = await pc.waitForTransactionReceipt({ hash: txHash });
           if (receipt.status === "success") {
-            setCachedId(MONAD_CHAIN_ID, address, ALLOWED_CONTRACT, "ERC721", id); // cache for instant next time
+            setCachedId(MONAD_CHAIN_ID, address, ALLOWED_CONTRACT, "ERC721", id);
             const total = addLives(MONAD_CHAIN_ID, address, 1);
             setLives(total);
             append(`+1 life (total: ${total})`);
@@ -367,7 +352,6 @@ export default function VaultPanel() {
         }
       }
 
-      // 1155 fallback
       const id1155 = await pickAnyErc1155(address as `0x${string}`);
       if (id1155 !== null) {
         append(`Sending ERC-1155 id=${id1155} x1 → VAULT...`);
@@ -455,71 +439,58 @@ export default function VaultPanel() {
   const modeLabel = useMemo(() => mode === "fast" ? "Fast (fewer probes)" : "Balanced (wider search)", [mode]);
 
   return (
-    <div className="mx-auto mt-6 max-w-3xl rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">
-      <div className="mb-2 text-sm text-zinc-400">
+    <div className="mx-auto mt-6 max-w-3xl rounded-2xl card">
+      <div className="mb-2 text-sm muted">
         Vault: <span className="font-mono">{VAULT}</span>
       </div>
-      <div className="mb-2 text-sm text-zinc-400">
+      <div className="mb-2 text-sm muted">
         Allowed: <span className="font-mono">{ALLOWED_CONTRACT}</span>
       </div>
 
-      <div className="mb-2 flex items-center gap-3 text-xs text-zinc-400">
+      <div className="mb-2 flex items-center gap-3 text-xs muted">
         <span>Scan mode:</span>
-        <button
-          className={`rounded px-2 py-1 border ${mode==="balanced"?"border-zinc-300":"border-zinc-700"}`}
-          onClick={()=>setMode("balanced")}
-        >Balanced</button>
-        <button
-          className={`rounded px-2 py-1 border ${mode==="fast"?"border-zinc-300":"border-zinc-700"}`}
-          onClick={()=>setMode("fast")}
-        >Fast</button>
+        <button className={`btn ${mode==="balanced"?"":"ghost"}`} onClick={()=>setMode("balanced")}>Balanced</button>
+        <button className={`btn ${mode==="fast"?"":"ghost"}`} onClick={()=>setMode("fast")}>Fast</button>
         <span className="opacity-70">{modeLabel}</span>
       </div>
 
-      <div className="mb-3 text-lg font-semibold">Send 1 NFT to Vault → get 1 life</div>
+      <div className="mb-3 text-lg card-title">Send 1 NFT to Vault → get 1 life</div>
 
-      <button
-        className="rounded-xl border border-zinc-700 px-4 py-2 text-sm hover:bg-zinc-800 disabled:opacity-50"
-        disabled={!canSend || busy}
-        onClick={sendOne}
-      >
+      <button className="btn btn-primary" disabled={!canSend || busy} onClick={sendOne}>
         {busy ? "Searching & sending…" : "Send 1 NFT to Vault"}
       </button>
 
       <div className="mt-3">
-        <button
-          className="text-xs underline text-zinc-400"
-          onClick={() => setAdvanced(v => !v)}
-        >
+        <button className="text-xs underline helper" onClick={() => setAdvanced(v => !v)}>
           {advanced ? "Hide" : "Advanced"} (manual id)
         </button>
         {advanced && (
-          <div className="mt-2 flex items-center gap-2">
-            <input
-              className="rounded-lg bg-zinc-900 px-3 py-2 text-sm"
-              placeholder="tokenId / id"
-              value={manualId}
-              onChange={(e)=>setManualId(e.target.value)}
-            />
-            <button
-              className="rounded-lg border border-zinc-700 px-3 py-2 text-sm"
-              onClick={sendManual}
-              disabled={!canSend || !manualId}
-            >
-              Send by ID
-            </button>
+          <div className="mt-2" style={{display:"flex", gap:8, alignItems:"center"}}>
+            <input className="input" style={{maxWidth:220}} placeholder="tokenId / id"
+              value={manualId} onChange={(e)=>setManualId(e.target.value)} />
+            <button className="btn" onClick={sendManual} disabled={!canSend || !manualId}>Send by ID</button>
           </div>
         )}
       </div>
 
-      <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-300">
-        <div className="mb-1 font-medium">Log</div>
-        <pre className="whitespace-pre-wrap break-all">{log || "—"}</pre>
+      <div className="mt-3 log">
+        <div className="mb-1" style={{fontWeight:600}}>Log</div>
+        <pre>{log || "—"}</pre>
       </div>
 
-      <div className="mt-1 text-sm">
-        Lives: <span className="font-semibold">{lives}</span>
+      {/* Hearts + numeric fallback */}
+      <div className="mt-2">
+        <div className="hearts">
+          {Array.from({ length: Math.max(3, Math.min(5, lives || 0)) }).map((_, i) => (
+            <div key={i} className={`heart ${i < (lives || 0) ? "pop" : "off"}`}>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 21s-7.5-4.35-9.33-8.23C1.4 10.3 2.2 7.6 4.7 6.6c1.85-.75 3.7-.18 4.8 1.18C10.5 6.42 12.35 5.85 14.2 6.6c2.5 1 3.3 3.7 2.03 6.17C19.5 16.65 12 21 12 21z"/>
+              </svg>
+            </div>
+          ))}
+        </div>
       </div>
+      <div className="mt-1 text-sm">Lives: <span className="font-semibold">{lives}</span></div>
     </div>
   );
 }
