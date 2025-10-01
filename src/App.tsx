@@ -28,17 +28,23 @@ const MONAD_TESTNET = defineChain({
   rpcUrls: { default: { http: [RPC_URL] } },
 });
 
-/** ---------- CONNECTORS ----------
- * Injected: MetaMask, Phantom (EVM), OKX, etc.
- * WalletConnect: QR modal enabled (stable version).
- * Coinbase Wallet: desktop/mobile app.
- */
+/** ---------- CONNECTORS (with WalletConnect modal theming) ---------- */
 const connectorsList = [
   injected(),
   WC_ID
     ? walletConnect({
         projectId: WC_ID,
-        showQrModal: true, // will open the QR modal
+        showQrModal: true,
+        // The options below customize the WalletConnect modal
+        qrModalOptions: {
+          themeMode: "dark",
+          themeVariables: {
+            "--wcm-accent-color": "#7c4dff",
+            "--wcm-background-color": "#0b0b13",
+            "--wcm-font-family": "Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
+            "--wcm-z-index": "99999"
+          }
+        },
         metadata: {
           name: "WoollyGotchi",
           description: "Tamagotchi mini-app on Monad testnet",
@@ -59,30 +65,12 @@ const config = createConfig({
 
 /** ---------- MINIMAL ERC-721 ABI ---------- */
 const ERC721_ABI = [
-  {
-    type: "function",
-    name: "balanceOf",
-    stateMutability: "view",
-    inputs: [{ name: "owner", type: "address" }],
-    outputs: [{ type: "uint256" }],
-  },
-  {
-    type: "function",
-    name: "ownerOf",
-    stateMutability: "view",
-    inputs: [{ name: "tokenId", type: "uint256" }],
-    outputs: [{ type: "address" }],
-  },
-  {
-    type: "function",
-    name: "burn",
-    stateMutability: "nonpayable",
-    inputs: [{ name: "tokenId", type: "uint256" }],
-    outputs: [],
-  },
+  { type: "function", name: "balanceOf", stateMutability: "view", inputs: [{ name: "owner", type: "address" }], outputs: [{ type: "uint256" }] },
+  { type: "function", name: "ownerOf", stateMutability: "view", inputs: [{ name: "tokenId", type: "uint256" }], outputs: [{ type: "address" }] },
+  { type: "function", name: "burn", stateMutability: "nonpayable", inputs: [{ name: "tokenId", type: "uint256" }], outputs: [] },
 ] as const;
 
-/** ---------- SIMPLE WALLET PICKER (overlay) ---------- */
+/** ---------- Simple wallet picker modal ---------- */
 function WalletPicker({
   open,
   onClose,
@@ -112,44 +100,29 @@ function WalletPicker({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        style={{
-          width: 420,
-          maxWidth: "90vw",
-          background: "#111",
-          border: "1px solid #222",
-          borderRadius: 16,
-          padding: 16,
-          color: "#fff",
-        }}
+        className="card"
+        style={{ width: 460, maxWidth: "92vw" }}
       >
-        <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>Connect a wallet</div>
-        <div style={{ display: "grid", gap: 8 }}>
+        <div className="title" style={{ fontSize: 20, marginBottom: 10 }}>Connect a wallet</div>
+        <div className="wallet-grid">
           {items.map((i) => (
             <button
               key={i.id}
               onClick={() => onPick(i.id)}
               disabled={pending}
-              style={{
-                padding: "10px 14px",
-                borderRadius: 12,
-                background: "#1a1a1a",
-                textAlign: "left",
-                border: "1px solid #2a2a2a",
-              }}
+              className="btn btn-ghost"
+              style={{ width: "100%" }}
             >
               {i.label}
             </button>
           ))}
         </div>
-        <div style={{ marginTop: 12, fontSize: 12, opacity: 0.6 }}>
-          WalletConnect will show a QR for mobile wallets (Phantom, Rainbow, OKX, etc.).
+        <div className="helper" style={{ marginTop: 10 }}>
+          WalletConnect opens a QR for mobile wallets (Phantom, Rainbow, OKX, etc.).
         </div>
-        <button
-          onClick={onClose}
-          style={{ marginTop: 12, padding: "8px 12px", borderRadius: 10, background: "#222" }}
-        >
-          Close
-        </button>
+        <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
+          <button onClick={onClose} className="btn">Close</button>
+        </div>
       </div>
     </div>
   );
@@ -189,7 +162,7 @@ function AppInner() {
       const c = connectors.find((x) => x.id === connectorId);
       if (!c) return;
 
-      // Helpful hint if no injected provider is present (common UX issue)
+      // Extra hint when no injected provider is present
       if (c.id === "injected") {
         const hasProvider =
           typeof window !== "undefined" &&
@@ -205,9 +178,7 @@ function AppInner() {
 
       await connect({ connector: c });
       setPickerOpen(false);
-      try {
-        await switchChain({ chainId: MONAD_TESTNET.id });
-      } catch {}
+      try { await switchChain({ chainId: MONAD_TESTNET.id }); } catch {}
     } catch (e: any) {
       console.error(e);
       alert(e?.shortMessage || e?.message || "Connect failed");
@@ -240,61 +211,65 @@ function AppInner() {
   };
 
   return (
-    <div style={{ minHeight: "100vh", background: "#000", color: "#fff", padding: 24 }}>
-      <h1 style={{ fontSize: 28, fontWeight: 700 }}>WoollyGotchi (Monad testnet)</h1>
-
-      {!isConnected ? (
-        <>
-          <button
-            onClick={() => setPickerOpen(true)}
-            style={{ padding: "10px 14px", borderRadius: 14, background: "#222", marginTop: 12 }}
-          >
+    <div className="container">
+      <header className="header">
+        <div className="title">WoollyGotchi (Monad testnet)</div>
+        {!isConnected ? (
+          <button className="btn btn-primary" onClick={() => setPickerOpen(true)}>
             Connect Wallet
           </button>
-          <WalletPicker
-            open={pickerOpen}
-            onClose={() => setPickerOpen(false)}
-            onPick={pickWallet}
-            items={walletItems}
-            pending={connectStatus === "pending"}
-          />
-        </>
-      ) : (
-        <div style={{ marginTop: 12 }}>
-          <div style={{ opacity: 0.8, fontSize: 12, marginBottom: 8 }}>{address}</div>
-          <button onClick={() => disconnect()} style={{ padding: "6px 10px", borderRadius: 12, background: "#222" }}>
-            Disconnect
-          </button>
-        </div>
-      )}
+        ) : (
+          <button className="btn" onClick={() => disconnect()}>Disconnect</button>
+        )}
+      </header>
 
-      <div style={{ marginTop: 24, background: "#111", padding: 16, borderRadius: 16, maxWidth: 560 }}>
-        <h2 style={{ marginTop: 0 }}>Token Gate</h2>
-        <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>
+      {/* Token gate card */}
+      <section className="card" style={{ marginTop: 18 }}>
+        <h2 className="card-title">Token Gate</h2>
+        <div className="helper" style={{ marginBottom: 10 }}>
           Collection: {NFT_ADDRESS || "(set VITE_NFT_ADDRESS in env)"}
         </div>
-        <button onClick={onCheckAccess} disabled={!isConnected || isFetching} style={{ padding: "10px 14px", borderRadius: 12, background: "#222" }}>
+        <button
+          className="btn btn-ghost"
+          onClick={onCheckAccess}
+          disabled={!isConnected || isFetching}
+        >
           {isFetching ? "Checking…" : "Check Access"}
         </button>
         {hasAccess !== null && (
-          <div style={{ marginTop: 10, fontSize: 14 }}>
-            Access: {hasAccess ? <span style={{ color: "#47e774" }}>granted</span> : <span style={{ color: "#ff5c5c" }}>denied</span>}
+          <div className="helper" style={{ marginTop: 10 }}>
+            Access: {hasAccess ? "granted ✅" : "denied ❌"}
           </div>
         )}
-      </div>
+      </section>
 
-      <div style={{ marginTop: 16, background: "#111", padding: 16, borderRadius: 16, maxWidth: 560 }}>
-        <h2 style={{ marginTop: 0 }}>Burn → +1 life (prototype)</h2>
+      {/* Burn card */}
+      <section className="card">
+        <h2 className="card-title">Burn → +1 life (prototype)</h2>
         <input
+          className="input"
           placeholder="tokenId (e.g., 0)"
           value={tokenIdToBurn}
           onChange={(e) => setTokenIdToBurn(e.target.value)}
-          style={{ width: "100%", padding: 10, borderRadius: 12, background: "#1b1b1b", color: "#fff", outline: "none", marginBottom: 10 }}
         />
-        <button onClick={onBurn} disabled={!isConnected || writeStatus === "pending"} style={{ padding: "10px 14px", borderRadius: 12, background: "#222" }}>
+        <div style={{ height: 10 }} />
+        <button
+          className="btn btn-ghost"
+          onClick={onBurn}
+          disabled={!isConnected || writeStatus === "pending"}
+        >
           {writeStatus === "pending" ? "Sending…" : "Burn"}
         </button>
-      </div>
+      </section>
+
+      {/* Wallet picker modal */}
+      <WalletPicker
+        open={pickerOpen && !isConnected}
+        onClose={() => setPickerOpen(false)}
+        onPick={pickWallet}
+        items={walletItems}
+        pending={connectStatus === "pending"}
+      />
     </div>
   );
 }
