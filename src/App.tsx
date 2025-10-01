@@ -1,5 +1,5 @@
 // src/App.tsx
-// App shell + WagmiProvider + custom wallet picker + VaultPanel (1 NFT = 1 life).
+// WagmiProvider + wallet connect + auto switch to Monad + VaultPanel.
 // Comments in English only.
 
 import React, { useMemo, useState } from "react";
@@ -12,25 +12,26 @@ import {
   useConnect,
   useDisconnect,
   useChainId,
+  useSwitchChain,
 } from "wagmi";
 import { injected, walletConnect, coinbaseWallet } from "wagmi/connectors";
 import { defineChain } from "viem";
 import VaultPanel from "./components/VaultPanel";
 
-/** ---------- ENV ---------- */
-const CHAIN_ID  = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
-const RPC_URL   = String(import.meta.env.VITE_RPC_URL ?? "https://testnet-rpc.monad.xyz");
-const WC_ID     = String(import.meta.env.VITE_WALLETCONNECT_PROJECT_ID ?? "");
+/* ===== ENV ===== */
+const MONAD_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
+const RPC_URL = String(import.meta.env.VITE_RPC_URL ?? "https://testnet-rpc.monad.xyz");
+const WC_ID = String(import.meta.env.VITE_WALLETCONNECT_PROJECT_ID ?? "");
 
-/** ---------- CHAIN ---------- */
-const MONAD_TESTNET = defineChain({
-  id: CHAIN_ID,
+/* ===== CHAIN ===== */
+const MONAD = defineChain({
+  id: MONAD_CHAIN_ID,
   name: "Monad Testnet",
   nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
   rpcUrls: { default: { http: [RPC_URL] } },
 });
 
-/** ---------- CONNECTORS (WalletConnect modal theming) ---------- */
+/* ===== CONNECTORS ===== */
 const connectorsList = [
   injected({ shimDisconnect: true }),
   WC_ID
@@ -63,15 +64,20 @@ const connectorsList = [
   coinbaseWallet({ appName: "WoollyGotchi" }),
 ].filter(Boolean);
 
-/** ---------- WAGMI CONFIG ---------- */
+/* ===== WAGMI CONFIG ===== */
 const config = createConfig({
-  chains: [MONAD_TESTNET],
+  chains: [MONAD],
   connectors: connectorsList as any,
-  transports: { [MONAD_TESTNET.id]: http(RPC_URL) },
+  transports: { [MONAD.id]: http(RPC_URL) },
   ssr: false,
 });
 
-/** ---------- Simple wallet picker modal ---------- */
+/* ===== UI HELPERS ===== */
+function short(addr?: `0x${string}`) {
+  if (!addr) return "";
+  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
+}
+
 function WalletPicker({
   open,
   onClose,
@@ -99,14 +105,8 @@ function WalletPicker({
         zIndex: 9999,
       }}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="card"
-        style={{ width: 460, maxWidth: "92vw" }}
-      >
-        <div className="title" style={{ fontSize: 20, marginBottom: 10 }}>
-          Connect a wallet
-        </div>
+      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: 460, maxWidth: "92vw" }}>
+        <div className="title" style={{ fontSize: 20, marginBottom: 10 }}>Connect a wallet</div>
         <div className="wallet-grid">
           {items.map((i) => (
             <button
@@ -124,31 +124,21 @@ function WalletPicker({
           WalletConnect opens a QR for mobile wallets (Phantom, Rainbow, OKX, etc.).
         </div>
         <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
-          <button onClick={onClose} className="btn">
-            Close
-          </button>
+          <button onClick={onClose} className="btn">Close</button>
         </div>
       </div>
     </div>
   );
 }
 
-function short(addr?: `0x${string}`) {
-  if (!addr) return "";
-  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
-}
-
-/** ---------- App content ---------- */
+/* ===== APP CONTENT ===== */
 function AppInner() {
   const { address, isConnected, status } = useAccount();
+  const chainId = useChainId();
   const { connect, connectors, status: connectStatus } = useConnect();
   const { disconnect } = useDisconnect();
-  const chainId = useChainId();
-  const { data: balance } = useBalance({
-    address,
-    chainId,
-    query: { enabled: !!address },
-  });
+  const { switchChain } = useSwitchChain();
+  const { data: balance } = useBalance({ address, chainId, query: { enabled: !!address } });
 
   const [pickerOpen, setPickerOpen] = useState(false);
 
@@ -156,10 +146,7 @@ function AppInner() {
     () =>
       connectors.map((c) => ({
         id: c.id,
-        label:
-          c.name === "Injected"
-            ? "Browser wallet (MetaMask / Phantom / OKX …)"
-            : c.name,
+        label: c.name === "Injected" ? "Browser wallet (MetaMask / Phantom / OKX …)" : c.name,
       })),
     [connectors]
   );
@@ -169,7 +156,6 @@ function AppInner() {
       const c = connectors.find((x) => x.id === connectorId);
       if (!c) return;
 
-      // Extra hint when no injected provider is present
       if (c.id === "injected") {
         const hasProvider =
           typeof window !== "undefined" &&
@@ -178,14 +164,18 @@ function AppInner() {
             (window as any).coinbaseWalletExtension ||
             (window as any).phantom?.ethereum);
         if (!hasProvider) {
-          alert(
-            "No browser wallet detected. Install/enable MetaMask/Phantom or use WalletConnect (QR)."
-          );
+          alert("No browser wallet detected. Install/enable MetaMask/Phantom or use WalletConnect (QR).");
           return;
         }
       }
 
       await connect({ connector: c });
+
+      // Auto switch to Monad chain
+      try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch (e) {
+        console.warn("Chain switch rejected/failed", e);
+      }
+
       setPickerOpen(false);
     } catch (e: any) {
       console.error(e);
@@ -195,7 +185,6 @@ function AppInner() {
 
   return (
     <div className="page">
-      {/* Top bar */}
       <header className="topbar">
         <div className="title">WoollyGotchi (Monad testnet)</div>
 
@@ -207,9 +196,7 @@ function AppInner() {
           <div className="walletRow">
             <span className="pill">{short(address)}</span>
             <span className="muted">
-              {balance
-                ? `${Number(balance.formatted).toFixed(4)} ${balance.symbol}`
-                : "—"}
+              {balance ? `${Number(balance.formatted).toFixed(4)} ${balance.symbol}` : "—"}
             </span>
             <span className="muted">Chain ID: {chainId ?? "—"}</span>
             <button className="btn ghost" onClick={() => disconnect()}>
@@ -219,15 +206,12 @@ function AppInner() {
         )}
       </header>
 
-      {/* Main panel: accept NFT to VAULT and grant lives */}
       <VaultPanel />
 
-      {/* Footer */}
       <footer className="foot">
         <span className="muted">Status: {status}</span>
       </footer>
 
-      {/* Wallet picker modal */}
       <WalletPicker
         open={pickerOpen && !isConnected}
         onClose={() => setPickerOpen(false)}
@@ -239,7 +223,7 @@ function AppInner() {
   );
 }
 
-/** ---------- Export root with provider ---------- */
+/* ===== EXPORT ROOT ===== */
 export default function App() {
   return (
     <WagmiProvider config={config}>
