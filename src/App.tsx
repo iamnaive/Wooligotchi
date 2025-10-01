@@ -1,5 +1,5 @@
 // src/App.tsx
-// WagmiProvider + wallet connect + auto switch to Monad + VaultPanel.
+// WagmiProvider + connectors + auto switch/add chain + VaultPanel.
 // Comments in English only.
 
 import React, { useMemo, useState } from "react";
@@ -23,12 +23,16 @@ const MONAD_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 const RPC_URL = String(import.meta.env.VITE_RPC_URL ?? "https://testnet-rpc.monad.xyz");
 const WC_ID = String(import.meta.env.VITE_WALLETCONNECT_PROJECT_ID ?? "");
 
-/* ===== CHAIN ===== */
+/* ===== CHAIN (include blockExplorers + testnet flag for addChain) ===== */
 const MONAD = defineChain({
   id: MONAD_CHAIN_ID,
   name: "Monad Testnet",
   nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
   rpcUrls: { default: { http: [RPC_URL] } },
+  blockExplorers: {
+    default: { name: "Explorer", url: "https://explorer.monad.testnet" }, // placeholder ok
+  },
+  testnet: true,
 });
 
 /* ===== CONNECTORS ===== */
@@ -121,7 +125,7 @@ function WalletPicker({
           ))}
         </div>
         <div className="helper" style={{ marginTop: 10 }}>
-          WalletConnect opens a QR for mobile wallets (Phantom, Rainbow, OKX, etc.).
+          If Phantom doesn't switch, use MetaMask/OKX/Rabby or WalletConnect with a wallet that supports custom testnets.
         </div>
         <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
           <button onClick={onClose} className="btn">Close</button>
@@ -171,9 +175,11 @@ function AppInner() {
 
       await connect({ connector: c });
 
-      // Auto switch to Monad chain
-      try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch (e) {
-        console.warn("Chain switch rejected/failed", e);
+      // Try to switch/add chain
+      try {
+        await switchChain({ chainId: MONAD_CHAIN_ID });
+      } catch (e) {
+        console.warn("Chain switch/add failed (Phantom often can't add custom testnets)", e);
       }
 
       setPickerOpen(false);
