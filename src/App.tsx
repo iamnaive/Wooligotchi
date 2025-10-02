@@ -1,4 +1,4 @@
-// src/App.tsx
+// src/App.tsx (DEBUG BUILD)
 import React, { useMemo, useState, useEffect } from "react";
 import {
   http,
@@ -53,10 +53,7 @@ const connectorsList = [
         metadata: {
           name: "Wooligotchi",
           description: "Tamagotchi mini-app on Monad",
-          url:
-            typeof window !== "undefined"
-              ? window.location.origin
-              : "https://example.com",
+          url: typeof window !== "undefined" ? window.location.origin : "https://example.com",
           icons: ["https://raw.githubusercontent.com/twitter/twemoji/master/assets/svg/1f423.svg"],
         },
       })
@@ -75,6 +72,7 @@ const config = createConfig({
 /* ===== Lives (1 NFT = 1 life) ===== */
 const LIVES_KEY = "wg_lives_v1";
 const lKey = (cid:number, addr:string)=>`${cid}:${addr.toLowerCase()}`;
+
 function getLivesLocal(cid:number, addr?:`0x${string}`|null){
   if (!addr) return 0;
   try {
@@ -83,26 +81,28 @@ function getLivesLocal(cid:number, addr?:`0x${string}`|null){
     return map[lKey(cid, addr)] ?? 0;
   } catch { return 0; }
 }
-function useLivesGate(chainId:number, address?:`0x${string}`|null){
+function useLivesGate(chainId:number|undefined, address?:`0x${string}`|null){
   const [lives, setLives] = React.useState(0);
   React.useEffect(()=>{
-    setLives(getLivesLocal(chainId, address));
+    const cid = chainId ?? MONAD_CHAIN_ID;
+    setLives(getLivesLocal(cid, address));
     const onStorage = (e: StorageEvent)=>{
-      if (e.key === LIVES_KEY) setLives(getLivesLocal(chainId, address));
+      if (e.key === LIVES_KEY) setLives(getLivesLocal(cid, address));
     };
-    const onCustom = ()=> setLives(getLivesLocal(chainId, address));
+    const onCustom = ()=> setLives(getLivesLocal(cid, address));
     window.addEventListener('storage', onStorage);
     window.addEventListener('wg:lives-changed', onCustom as any);
     return ()=>{ window.removeEventListener('storage', onStorage); window.removeEventListener('wg:lives-changed', onCustom as any); };
   }, [chainId, address]);
   return lives;
 }
-function spendOneLife(chainId:number, address?:`0x${string}`|null) {
+function spendOneLife(chainId:number|undefined, address?:`0x${string}`|null) {
+  const cid = chainId ?? MONAD_CHAIN_ID;
   if (!address) return;
   try {
     const raw = localStorage.getItem(LIVES_KEY);
     const map = raw ? (JSON.parse(raw) as Record<string, number>) : {};
-    const key = lKey(chainId, address);
+    const key = lKey(cid, address);
     const cur = map[key] ?? 0;
     if (cur > 0) {
       map[key] = cur - 1;
@@ -111,6 +111,18 @@ function spendOneLife(chainId:number, address?:`0x${string}`|null) {
     }
   } catch (e) { console.error("spendOneLife failed", e); }
 }
+function grantLives(chainId:number|undefined, address?:`0x${string}`|null, count=1) {
+  const cid = chainId ?? MONAD_CHAIN_ID;
+  if (!address || count<=0) return;
+  try {
+    const key = lKey(cid, address);
+    const raw = localStorage.getItem(LIVES_KEY);
+    const map = raw ? (JSON.parse(raw) as Record<string, number>) : {};
+    map[key] = (map[key] ?? 0) + count;
+    localStorage.setItem(LIVES_KEY, JSON.stringify(map));
+    window.dispatchEvent(new Event("wg:lives-changed"));
+  } catch (e) { console.error("grantLives failed", e); }
+}
 
 /* ===== PetConfig ===== */
 type PetConfig = { name: string; fps?: number; anims: AnimSet; };
@@ -118,73 +130,48 @@ function makeConfigFromForm(form: FormKey): PetConfig {
   return { name: "Tamagotchi", fps: 8, anims: catalog[form] };
 }
 
-/* ===== Evolution (timed) ===== */
+/* ===== Evolution (simple random; таймеры можно вернуть позже) ===== */
 const FORM_KEY_STORAGE = "wg_form_v1";
-const FORM_TS_KEY = "wg_form_ts_v1";        // when current form was entered
-const FIRST_CHAR_TS_KEY = "wg_first_char_ts_v1"; // when first became any charN
-
-function loadForm(): FormKey {
-  const raw = localStorage.getItem(FORM_KEY_STORAGE);
-  return (raw as FormKey) || "egg";
-}
-function saveForm(f: FormKey) {
-  localStorage.setItem(FORM_KEY_STORAGE, f);
-  localStorage.setItem(FORM_TS_KEY, String(Date.now()));
-  if (f.startsWith("char") && !localStorage.getItem(FIRST_CHAR_TS_KEY)) {
-    localStorage.setItem(FIRST_CHAR_TS_KEY, String(Date.now()));
-  }
-}
-function nextFormRandomAfterTimers(current: FormKey): FormKey | null {
-  const now = Date.now();
-  const enteredTs = Number(localStorage.getItem(FORM_TS_KEY) || now);
-  const since = now - enteredTs;
-
-  // egg -> egg_adult after 5 minutes
-  if (current === "egg" && since >= 5 * 60 * 1000) return "egg_adult";
-
-  // egg_adult -> random char1..char4 after 8 hours
-  if (current === "egg_adult" && since >= 8 * 60 * 60 * 1000) {
+function loadForm(): FormKey { return (localStorage.getItem(FORM_KEY_STORAGE) as FormKey) || "egg"; }
+function saveForm(f: FormKey) { localStorage.setItem(FORM_KEY_STORAGE, f); }
+function nextFormRandom(current: FormKey): FormKey {
+  if (current === "egg") return "egg_adult";
+  if (current === "egg_adult") {
     const pool: FormKey[] = ["char1","char2","char3","char4"];
-    const pick = pool[Math.floor(Math.random() * pool.length)];
-    return pick;
+    return pool[Math.floor(Math.random() * pool.length)];
   }
+  const map: Record<FormKey, FormKey> = {
+    egg: "egg_adult",
+    egg_adult: "char1",
+    char1: "char1_adult", char1_adult: "char1_adult",
+    char2: "char2_adult", char2_adult: "char2_adult",
+    char3: "char3_adult", char3_adult: "char3_adult",
+    char4: "char4_adult", char4_adult: "char4_adult",
+  };
+  return map[current] ?? current;
+}
 
-  // charN -> charN_adult after 2 days from FIRST_CHAR_TS (first char stage)
-  if (/^char[1-4]$/.test(current)) {
-    const firstCharTs = Number(localStorage.getItem(FIRST_CHAR_TS_KEY) || now);
-    if (now - firstCharTs >= 2 * 24 * 60 * 60 * 1000) {
-      return (current + "_adult") as FormKey;
+/* ===== Error Boundary (ловим любые падения) ===== */
+class ErrorBoundary extends React.Component<{children: React.ReactNode},{err: any}> {
+  constructor(props:any){ super(props); this.state = { err: null }; }
+  static getDerivedStateFromError(err:any){ return { err }; }
+  componentDidCatch(err:any, info:any){ console.error("UI crash:", err, info); }
+  render(){
+    if (this.state.err) {
+      return (
+        <div className="card" style={{margin:"16px auto", maxWidth:880}}>
+          <div style={{fontWeight:700, marginBottom:6}}>Render error</div>
+          <div style={{whiteSpace:"pre-wrap", fontFamily:"monospace", fontSize:12}}>
+            {String(this.state.err?.message || this.state.err)}
+          </div>
+        </div>
+      );
     }
+    return this.props.children as any;
   }
-
-  return null;
 }
 
-/* ===== Wallet Picker / Splash (unchanged) ===== */
-function WalletPicker({ open, onClose, onPick, items, pending }: {
-  open: boolean; onClose: () => void; onPick: (id: string) => void;
-  items: { id: string; label: string }[]; pending: boolean;
-}) {
-  if (!open) return null;
-  return (
-    <div onClick={onClose} className="modal">
-      <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: 460, maxWidth: "92vw" }}>
-        <div className="title" style={{ fontSize: 20, marginBottom: 10, color: "white" }}>Connect a wallet</div>
-        <div className="wallet-grid">
-          {items.map((i) => (
-            <button key={i.id} onClick={() => onPick(i.id)} disabled={pending} className="btn btn-ghost" style={{ width: "100%" }}>
-              {i.label}
-            </button>
-          ))}
-        </div>
-        <div className="helper" style={{ marginTop: 10 }}>WalletConnect opens a QR for mobile wallets (Phantom, Rainbow, OKX, etc.).</div>
-        <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
-          <button onClick={onClose} className="btn">Close</button>
-        </div>
-      </div>
-    </div>
-  );
-}
+/* ===== Small helpers ===== */
 function Splash({ children }: { children?: React.ReactNode }) {
   return (
     <section className="card splash">
@@ -194,6 +181,19 @@ function Splash({ children }: { children?: React.ReactNode }) {
         {children}
       </div>
     </section>
+  );
+}
+function DebugHUD({ gate, lives, isConnected, address, chainId }:{
+  gate: "splash"|"locked"|"game", lives:number, isConnected:boolean, address?:`0x${string}`|null, chainId?:number
+}){
+  return (
+    <div style={{position:"fixed", left:12, bottom:12, padding:"6px 10px",
+      background:"rgba(0,0,0,0.45)", border:"1px solid rgba(255,255,255,0.2)", borderRadius:8, fontSize:12, zIndex:9999}}>
+      <div>gate: <b>{gate}</b></div>
+      <div>lives: <b>{lives}</b> | connected: <b>{String(isConnected)}</b></div>
+      <div>addr: {address ?? "—"}</div>
+      <div>chainId: {chainId ?? "—"}</div>
+    </div>
   );
 }
 
@@ -206,46 +206,26 @@ function AppInner() {
   const { switchChain } = useSwitchChain();
   const { data: balance } = useBalance({ address, chainId, query: { enabled: !!address } });
   const [pickerOpen, setPickerOpen] = useState(false);
-  const lives = useLivesGate(MONAD_CHAIN_ID, address);
 
-  // Active form with persistence + time stamps
-  const [form, setForm] = useState<FormKey>(() => {
-    const f = loadForm();
-    if (!localStorage.getItem(FORM_TS_KEY)) {
-      localStorage.setItem(FORM_TS_KEY, String(Date.now()));
-      if (f.startsWith("char") && !localStorage.getItem(FIRST_CHAR_TS_KEY))
-        localStorage.setItem(FIRST_CHAR_TS_KEY, String(Date.now()));
-    }
-    return f;
-  });
+  // lives from localStorage for CURRENT chainId
+  const lives = useLivesGate(chainId, address);
+
+  // form
+  const [form, setForm] = useState<FormKey>(() => loadForm());
   useEffect(() => { saveForm(form); }, [form]);
-
-  // Check timers every minute
-  useEffect(() => {
-    const check = () => {
-      const next = nextFormRandomAfterTimers(form);
-      if (next && next !== form) setForm(next);
-    };
-    check(); // run once at mount
-    const id = setInterval(check, 60 * 1000);
-    return () => clearInterval(id);
-  }, [form]);
-
   const petConfig = useMemo(() => makeConfigFromForm(form), [form]);
 
   const walletItems = useMemo(
     () => connectors.map((c) => ({
       id: c.id,
       label: c.name === "Injected" ? "Browser wallet (MetaMask / Phantom / OKX …)" : c.name,
-    })),
-    [connectors]
+    })), [connectors]
   );
 
   const pickWallet = async (connectorId: string) => {
     try {
       const c = connectors.find((x) => x.id === connectorId);
       if (!c) return;
-
       if (c.id === "injected") {
         const hasProvider =
           typeof window !== "undefined" &&
@@ -258,7 +238,6 @@ function AppInner() {
           return;
         }
       }
-
       await connect({ connector: c });
       try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {}
       setPickerOpen(false);
@@ -268,12 +247,15 @@ function AppInner() {
     }
   };
 
-  // Optional: manual evolve trigger (kept for debug)
   const evolve = React.useCallback(() => {
-    const next = nextFormRandomAfterTimers(form);
-    if (next) setForm(next);
-    return next ?? form;
+    const next = nextFormRandom(form);
+    setForm(next);
+    return next;
   }, [form]);
+
+  // gate status
+  const gate: "splash"|"locked"|"game" =
+    !isConnected ? "splash" : (lives <= 0 ? "locked" : "game");
 
   return (
     <div className="page">
@@ -283,6 +265,7 @@ function AppInner() {
           <div className="logo">🐣</div>
           <div className="title">Wooligotchi</div>
         </div>
+
         {!isConnected ? (
           <button className="btn btn-primary" onClick={() => setPickerOpen(true)}>
             Connect Wallet
@@ -302,43 +285,73 @@ function AppInner() {
         )}
       </header>
 
-      {/* Gate */}
-      {!isConnected ? (
+      {/* Gate branches */}
+      {gate === "splash" && (
         <Splash>
           <div style={{ display:"flex", justifyContent:"center", gap:12, marginTop:10 }}>
             <button className="btn btn-primary btn-lg" onClick={()=>setPickerOpen(true)}>Connect wallet</button>
           </div>
         </Splash>
-      ) : lives <= 0 ? (
+      )}
+
+      {gate === "locked" && (
         <Splash>
           <div className="muted">Send 1 NFT → get 1 life</div>
           <VaultPanel mode="cta" />
+          {/* dev helper */}
+          <div style={{marginTop:12, display:"flex", justifyContent:"center"}}>
+            <button className="btn" onClick={()=>grantLives(chainId, address, 1)}>Dev: +1 life</button>
+          </div>
         </Splash>
-      ) : (
-        <>
-          {/* Game */}
-          <GameProvider config={petConfig}>
-            <Tamagotchi
-              currentForm={form}
-              onEvolve={evolve}
-              lives={lives}
-              onLoseLife={() => spendOneLife(MONAD_CHAIN_ID, address)}
-            />
-          </GameProvider>
-        </>
+      )}
+
+      {gate === "game" && (
+        <ErrorBoundary>
+          <div style={{maxWidth:980, margin:"0 auto"}}>
+            {/* маленький заголовок для уверенности что блок смонтирован */}
+            <div className="muted" style={{margin:"8px 0"}}>Game mounted · form: {form}</div>
+            <GameProvider config={petConfig}>
+              <Tamagotchi
+                currentForm={form}
+                onEvolve={evolve}
+                lives={lives}
+                onLoseLife={() => spendOneLife(chainId, address)}
+              />
+            </GameProvider>
+          </div>
+        </ErrorBoundary>
       )}
 
       <footer className="foot">
         <span className="muted">Status: {status}</span>
       </footer>
 
-      <WalletPicker
-        open={pickerOpen && !isConnected}
-        onClose={() => setPickerOpen(false)}
-        onPick={pickWallet}
-        items={walletItems}
-        pending={connectStatus === "pending"}
-      />
+      {/* Wallet picker */}
+      <div>
+        {pickerOpen && !isConnected && (
+          <div onClick={()=>setPickerOpen(false)} className="modal">
+            <div onClick={(e)=>e.stopPropagation()} className="card" style={{width:460, maxWidth:"92vw"}}>
+              <div className="title" style={{ fontSize: 20, marginBottom: 10, color: "white" }}>Connect a wallet</div>
+              <div className="wallet-grid">
+                {walletItems.map((i) => (
+                  <button key={i.id} onClick={() => pickWallet(i.id)} disabled={connectStatus === "pending"} className="btn btn-ghost" style={{ width: "100%" }}>
+                    {i.label}
+                  </button>
+                ))}
+              </div>
+              <div className="helper" style={{ marginTop: 10 }}>
+                WalletConnect opens a QR for mobile wallets (Phantom, Rainbow, OKX, etc.).
+              </div>
+              <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
+                <button onClick={()=>setPickerOpen(false)} className="btn">Close</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Debug HUD in the corner */}
+      <DebugHUD gate={gate} lives={lives} isConnected={isConnected} address={address} chainId={chainId} />
     </div>
   );
 }
