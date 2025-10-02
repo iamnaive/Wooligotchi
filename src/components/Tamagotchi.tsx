@@ -4,6 +4,8 @@ import { catalog, type FormKey, type AnimSet as AnyAnimSet } from "../game/catal
 
 /** ===== Visual & behavior constants ===== */
 const DEAD_FALLBACK = "/sprites/dead.png";
+// Avatar rendering cap (top-right). Sprite is scaled down if larger.
+const AVATAR_MAX_SIZE = 42; // logical pixels (set 40..48 to taste)
 
 /** Scaling:
  * - EGG_SCALE shrinks only the egg (native sprite -> multiplied by this factor).
@@ -551,44 +553,50 @@ export default function Tamagotchi({
         ctx.drawImage(bg, dx, dy, dw, dh);
       }
 
-      // --- Top-right avatar (draw at native sprite size, no autoscale) ---
-      const now = Date.now();
-      const sleepingNow = isSleepingAt(now);
-      const avatarAnimKey: AnimKey = (() => {
-        if (deadRef.current) return "idle";
-        if (sleepingNow) return def.sleep?.length ? "sleep" : "idle";
-        if (sickRef.current && (def.sick?.length ?? 0) > 0) return "sick";
-        if (statsRef.current.happiness < 0.35) return (def.sad?.length ? "sad" : def.unhappy?.length ? "unhappy" : "idle") as AnimKey;
-        return def.idle?.length ? "idle" : "walk";
-      })();
-      const avatarFrames = (def[avatarAnimKey] ?? def.idle ?? def.walk ?? []) as string[];
-      const avatarSrc = avatarFrames[0];
-      if (avatarSrc && images[avatarSrc]) {
-        const av = images[avatarSrc];
-        // native size (no 40x40)
-        const aw = av.width;
-        const ah = av.height;
-        const padX = 10, padY = 6;
-        const ax = LOGICAL_W - padX - aw;
-        const ay = padY;
-        (ctx as any).imageSmoothingEnabled = false;
-        ctx.drawImage(av, ax, ay, aw, ah);
+      // --- Top-right avatar (draw with a soft max size cap) ---
+const now = Date.now();
+const sleepingNow = isSleepingAt(now);
+const avatarAnimKey: AnimKey = (() => {
+  if (deadRef.current) return "idle";
+  if (sleepingNow) return def.sleep?.length ? "sleep" : "idle";
+  if (sickRef.current && (def.sick?.length ?? 0) > 0) return "sick";
+  if (statsRef.current.happiness < 0.35) return (def.sad?.length ? "sad" : def.unhappy?.length ? "unhappy" : "idle") as AnimKey;
+  return def.idle?.length ? "idle" : "walk";
+})();
+const avatarFrames = (def[avatarAnimKey] ?? def.idle ?? def.walk ?? []) as string[];
+const avatarSrc = avatarFrames[0];
 
-        // HP badge
-        const hp = Math.round((statsRef.current.health ?? 0) * 100);
-        const label = `❤️ ${hp}%`;
-        ctx.font = "10px monospace";
-        ctx.textBaseline = "alphabetic";
-        const tw = ctx.measureText(label).width;
-        const tx = ax + aw - tw - 2;
-        const ty = ay + ah - 4;
-        ctx.lineWidth = 3;
-        ctx.strokeStyle = "rgba(0,0,0,0.75)";
-        ctx.strokeText(label, tx, ty);
-        ctx.fillStyle = "#fff";
-        ctx.fillText(label, tx, ty);
-      }
+if (avatarSrc && images[avatarSrc]) {
+  const av = images[avatarSrc];
 
+  // Scale down only if the native sprite is larger than AVATAR_MAX_SIZE.
+  // This keeps pixel-sharp look while avoiding huge avatars (like a big egg PNG).
+  const nativeMax = Math.max(av.width, av.height);
+  const scale = nativeMax > AVATAR_MAX_SIZE ? (AVATAR_MAX_SIZE / nativeMax) : 1;
+  const aw = Math.round(av.width * scale);
+  const ah = Math.round(av.height * scale);
+
+  const padX = 10, padY = 6;
+  const ax = LOGICAL_W - padX - aw;
+  const ay = padY;
+
+  (ctx as any).imageSmoothingEnabled = false;
+  ctx.drawImage(av, ax, ay, aw, ah);
+
+  // HP badge anchored to bottom-right of the avatar
+  const hp = Math.round((statsRef.current.health ?? 0) * 100);
+  const label = `❤️ ${hp}%`;
+  ctx.font = "10px monospace";
+  ctx.textBaseline = "alphabetic";
+  const tw = ctx.measureText(label).width;
+  const tx = ax + aw - tw - 2;
+  const ty = ay + ah - 4;
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = "rgba(0,0,0,0.75)";
+  ctx.strokeText(label, tx, ty);
+  ctx.fillStyle = "#fff";
+  ctx.fillText(label, tx, ty);
+}
       // World layer (shifted down)
       ctx.save();
       ctx.translate(0, Y_SHIFT);
