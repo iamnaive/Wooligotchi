@@ -2,8 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 /**
  * PixelViewport
- * Logical scene has fixed resolution (w × h). We upscale it by an integer factor
- * to fit available space, with nearest-neighbor (no blur).
+ * Fixed logical resolution (width × height) with integer upscaling (nearest-neighbor).
  */
 export default function PixelViewport({
   width,
@@ -38,9 +37,6 @@ export default function PixelViewport({
     return Math.max(1, s);
   }, [avail, width, height]);
 
-  const scaledW = width * scale;
-  const scaledH = height * scale;
-
   return (
     <div
       ref={hostRef}
@@ -54,27 +50,18 @@ export default function PixelViewport({
         overflow: "hidden",
       }}
     >
+      {/* Logical plane: width × height (не масштабированный!) */}
       <div
         style={{
-          width: scaledW,
-          height: scaledH,
+          width,
+          height,
+          position: "relative",
+          imageRendering: "pixelated",
           transform: `scale(${scale})`,
           transformOrigin: "top left",
-          imageRendering: "pixelated",
-          position: "relative",
         }}
       >
-        <div
-          style={{
-            width,
-            height,
-            position: "relative",
-            overflow: "hidden",
-            imageRendering: "pixelated",
-          }}
-        >
-          {children}
-        </div>
+        {children}
       </div>
     </div>
   );
