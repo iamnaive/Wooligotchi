@@ -2,30 +2,32 @@ import React, { useMemo } from "react";
 import { useAccount } from "wagmi";
 import Sprite from "./Sprite";
 import PixelViewport from "./PixelViewport";
+import StageWalker from "./StageWalker";
 import { useGame, useReviveWithLife } from "../game/useGame";
-
-const MONAD_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
+import { STAGE_BG } from "../game/catalog";
 
 /** Tamagotchi scene:
- *  - .avatar (purple frame): static portrait/sprite
- *  - .stage  (red frame): PixelViewport 320×180 (upscales with integer factor)
+ *  - .avatar (purple frame): portrait/loop
+ *  - .stage  (red frame): PixelViewport 320×180, background image, walking actor
  *  - .hud    (yellow frame): actions and status bars
+ *
+ *  All text/comments in English as requested.
  */
 export default function Tamagotchi() {
   const { address } = useAccount();
-  const { state, dispatch, config } = useGame();
-  const { can, revive } = useReviveWithLife(MONAD_CHAIN_ID, address);
+  const { state, dispatch, config } = useGame(); // config.anims = active form's anim set
+  const { can, revive } = useReviveWithLife(Number(import.meta.env.VITE_CHAIN_ID ?? 10143), address);
 
   const frames = useMemo(() => {
     const a = config.anims;
     switch (state.activeAnim) {
-      case "eat":   return a.eat;
-      case "play":  return a.play;
-      case "sleep": return a.sleep;
-      case "sick":  return a.sick;
-      case "poop":  return a.poop;
-      case "clean": return a.clean;
-      case "die":   return a.die;
+      case "eat":   return a.eat ?? a.idle;
+      case "play":  return a.play ?? a.idle;
+      case "sleep": return a.sleep ?? a.idle;
+      case "sick":  return a.sick ?? a.idle;
+      case "poop":  return a.poop ?? a.idle;
+      case "clean": return a.clean ?? a.idle;
+      case "die":   return a.die ?? a.idle;
       default:      return a.idle;
     }
   }, [state.activeAnim, config]);
@@ -46,39 +48,38 @@ export default function Tamagotchi() {
       <div className="game-grid">
         {/* Avatar (purple) */}
         <div className="avatar">
-          <Sprite frames={config.anims.idle} fps={config.fps ?? 8} loop />
+          <Sprite frames={config.anims.avatar ?? config.anims.idle} fps={config.fps ?? 8} loop />
         </div>
 
-        {/* Stage (red): fixed logical 320×180, integer upscaling, no blur */}
+        {/* Stage (red): fixed logical 320×180 with background and walking actor */}
         <div className="stage">
           <PixelViewport width={320} height={180} className="stage-viewport">
-            {/* This is the logical 320×180 plane. Use absolute coords in this space. */}
-            {/* Example background grid (remove later): */}
-            <div
+            {/* Background image fills logical scene (no blur via nearest-neighbor scale outside) */}
+            <img
+              src={STAGE_BG}
+              alt=""
               style={{
                 position: "absolute",
                 inset: 0,
-                background:
-                  "linear-gradient(#10162b 1px, transparent 1px) 0 0 / 16px 16px, linear-gradient(90deg,#10162b 1px, transparent 1px) 0 0 / 16px 16px, #0e1426",
-              }}
-            />
-            {/* Example character placeholder at x=20,y=100: */}
-            <div
-              style={{
-                position: "absolute",
-                left: 20,
-                top: 100,
-                width: 32,
-                height: 32,
+                width: "100%",
+                height: "100%",
+                objectFit: "fill",
                 imageRendering: "pixelated",
               }}
-            >
-              <img
-                src={config.anims.idle[0]}
-                alt=""
-                style={{ width: "100%", height: "100%", imageRendering: "pixelated" }}
-              />
-            </div>
+            />
+
+            {/* Walking actor (egg or current form if walk is provided) */}
+            <StageWalker
+              frames={config.anims.walk ?? config.anims.idle}
+              spriteW={32}
+              spriteH={32}
+              speed={26}
+              left={8}
+              right={312}
+              y={164}
+              auto
+              fps={8}
+            />
           </PixelViewport>
         </div>
 
