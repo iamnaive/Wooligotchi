@@ -6,11 +6,12 @@ import { catalog, type FormKey, type AnimSet as AnyAnimSet } from "../game/catal
 /** ===== Constants ===== */
 const DEAD_FALLBACK = "/sprites/dead.png";
 
-/** Vault / contract (full address + copy) */
-const NFT_CONTRACT = "0x88c78d5852f45935324c6d100052958f694e8446"; // full address, not shortened
+/** Full vault/contract address (no shortening) + copy button uses it */
+const NFT_CONTRACT = "0x88c78d5852f45935324c6d100052958f694e8446";
 
-/** HUD avatar scale cap (logical px). Never upscale. */
+/** HUD avatar & food scale cap (logical px). Never upscale. */
 const AVATAR_SCALE_CAP: number | null = 42;
+const FOOD_FRAME_MAX_PX = 42;
 
 /** World sprite scaling */
 const EGG_SCALE = 0.50;
@@ -29,41 +30,41 @@ const FEED_FRAMES = {
   burger: ["/sprites/ui/food/burger/000.png", "/sprites/ui/food/burger/001.png", "/sprites/ui/food/burger/002.png"],
   cake:   ["/sprites/ui/food/cake/000.png",   "/sprites/ui/food/cake/001.png",   "/sprites/ui/food/cake/002.png"],
 } as const;
-/** Food render cap to match HUD idle cap */
-const FOOD_FRAME_MAX_PX = 42;
 
 /** Scoop (cleaning) sprite */
 const SCOOP_SRC = "/sprites/ui/scoop.png";
 
-/** Storage keys */
-const START_TS_KEY = "wg_start_ts_v2";
-const LAST_SEEN_KEY = "wg_last_seen_v3";
-const AGE_MS_KEY = "wg_age_ms_v4";
-const AGE_MAX_WALL_KEY = "wg_age_max_wall_v2";
-const POOPS_KEY = "wg_poops_v1";
-const SLEEP_LOCK_KEY = "wg_sleep_lock_v1";
-const SLEEP_FROM_KEY = "wg_sleep_from_v1";
-const SLEEP_TO_KEY = "wg_sleep_to_v1";
-
-/** Catastrophes */
-const CATA_SCHEDULE_KEY = "wg_cata_schedule_v2";
-const CATA_CONSUMED_KEY = "wg_cata_consumed_v2";
-const CATA_DURATION_MS = 60_000;
-const CATASTROPHE_CAUSES = ["food poisoning", "mysterious flu", "meteor dust", "bad RNG", "doom day syndrome"] as const;
+/** Base keys (namespaced later via sk()) */
+const START_TS_KEY = "start_ts_v2";
+const LAST_SEEN_KEY = "last_seen_v3";
+const AGE_MS_KEY = "age_ms_v4";
+const AGE_MAX_WALL_KEY = "age_max_wall_v2";
+const POOPS_KEY = "poops_v1";
+const SLEEP_LOCK_KEY = "sleep_lock_v1";
+const SLEEP_FROM_KEY = "sleep_from_v1";
+const SLEEP_TO_KEY = "sleep_to_v1";
+const CATA_SCHEDULE_KEY = "cata_schedule_v2";
+const CATA_CONSUMED_KEY = "cata_consumed_v2";
+/** New persisted keys */
+const FORM_KEY = "form_v1";
+const STATS_KEY = "stats_v1";
+const SICK_KEY = "sick_v1";
+const DEAD_KEY = "dead_v1";
+const DEATH_REASON_KEY = "death_reason_v1";
 
 /** Stage layout */
 const LOGICAL_W = 320, LOGICAL_H = 180;
 const FPS = 6, WALK_SPEED = 42;
 const MAX_W = 720, CANVAS_H = 360;
 const BAR_H = 6, BASE_GROUND = 48, Y_SHIFT = 26;
-/** Extra offset to lower poops & scoop by 10px (per request) */
+/** Lower poops & scoop by 10 px (requested) */
 const EXTRA_DOWN = 10;
 
 const HEAL_COOLDOWN_MS = 60_000;
 
 /** Food logic */
 const FEED_COOLDOWN_MS = 5_000;
-/** 2x slower animation: 1.2s total for 3 frames */
+/** 2x slower playback: 1.2s total for 3 frames */
 const FEED_ANIM_TOTAL_MS = 1200;
 const FEED_FRAMES_COUNT = 3;
 const FEED_EFFECTS = {
@@ -83,12 +84,19 @@ export default function Tamagotchi({
   lives = 0,
   onLoseLife = () => {},
   onEvolve,
+  walletAddress, // optional: if provided, progress is namespaced per wallet
 }: {
   currentForm: FormKey;
   lives?: number;
   onLoseLife?: () => void;
   onEvolve?: (next?: FormKey) => FormKey | void;
+  walletAddress?: string;
 }) {
+  /** Wallet namespace for storage */
+  const addr = (walletAddress || "").toLowerCase();
+  const SK_PREFIX = addr ? `wg_${addr}_` : `wg_`;
+  const sk = (k: string) => `${SK_PREFIX}${k}`;
+
   /** Forms */
   const CHILD_CHOICES: FormKey[] = ["chog_child", "molandak_child", "moyaki_child", "we_child"];
   const ADULT_MAP: Record<string, FormKey> = {
@@ -112,23 +120,39 @@ export default function Tamagotchi({
 
   /** Controlled->uncontrolled handoff (avoid parent overrides) */
   const firstSyncDone = useRef(false);
-  const [form, setForm] = useState<FormKey>(() => normalizeForm(currentForm));
+  const [form, setForm] = useState<FormKey>(() => {
+    const saved = safeReadJSON<FormKey>(sk(FORM_KEY));
+    if (saved && catalog[saved]) return saved;
+    return normalizeForm(currentForm);
+  });
   useEffect(() => {
     if (!firstSyncDone.current) {
-      setForm(normalizeForm(currentForm));
+      // only once on mount; afterward local state owns evolution
+      setForm((prev) => (prev ? prev : normalizeForm(currentForm)));
       firstSyncDone.current = true;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentForm]);
 
   /** Core state */
-  const [anim, setAnim] = useState<AnimKey>("walk");
-  const [stats, setStats] = useState<Stats>({ cleanliness: 0.9, hunger: 0.65, happiness: 0.6, health: 1.0 });
-  const [poops, setPoops] = useState<Poop[]>([]);
-  const [isSick, setIsSick] = useState(false);
-  const [isDead, setIsDead] = useState(false);
-  const [deathReason, setDeathReason] = useState<string | null>(null);
+  const [stats, setStats] = useState<Stats>(() => {
+    const saved = safeReadJSON<Stats>(sk(STATS_KEY));
+    return saved ? clampStats(saved) : { cleanliness: 0.9, hunger: 0.65, happiness: 0.6, health: 1.0 };
+  });
+  const [poops, setPoops] = useState<Poop[]>(() => {
+    const arr = safeReadJSON<Poop[]>(sk(POOPS_KEY));
+    return Array.isArray(arr) ? arr.slice(0, 12) : [];
+  });
+  const [isSick, setIsSick] = useState<boolean>(() => !!safeReadJSON<boolean>(sk(SICK_KEY)));
+  const [isDead, setIsDead] = useState<boolean>(() => !!safeReadJSON<boolean>(sk(DEAD_KEY)));
+  const [deathReason, setDeathReason] = useState<string | null>(() => {
+    const s = safeReadJSON<string | null>(sk(DEATH_REASON_KEY));
+    return typeof s === "string" ? s : null;
+  });
   const [lifeSpentForThisDeath, setLifeSpentForThisDeath] = useState<boolean>(false);
+
+  const [anim, setAnim] = useState<AnimKey>("walk");
+  const [lastHealAt, setLastHealAt] = useState<number>(0);
 
   /** Food cooldowns & animation */
   const [lastBurgerAt, setLastBurgerAt] = useState<number>(0);
@@ -139,14 +163,14 @@ export default function Tamagotchi({
   const [cleaning, setCleaning] = useState<ScoopState | null>(null);
 
   /** Sleep window */
-  const [useAutoTime, setUseAutoTime] = useState<boolean>(() => !localStorage.getItem(SLEEP_LOCK_KEY));
-  const [sleepStart, setSleepStart] = useState<string>(() => localStorage.getItem(SLEEP_FROM_KEY) || "22:00");
-  const [wakeTime, setWakeTime] = useState<string>(() => localStorage.getItem(SLEEP_TO_KEY) || "08:30");
-  const [sleepLocked, setSleepLocked] = useState<boolean>(() => !!localStorage.getItem(SLEEP_LOCK_KEY));
+  const [useAutoTime, setUseAutoTime] = useState<boolean>(() => !localStorage.getItem(sk(SLEEP_LOCK_KEY)));
+  const [sleepStart, setSleepStart] = useState<string>(() => localStorage.getItem(sk(SLEEP_FROM_KEY)) || "22:00");
+  const [wakeTime, setWakeTime] = useState<string>(() => localStorage.getItem(sk(SLEEP_TO_KEY)) || "08:30");
+  const [sleepLocked, setSleepLocked] = useState<boolean>(() => !!localStorage.getItem(sk(SLEEP_LOCK_KEY)));
 
   /** Age */
   const [ageMs, setAgeMs] = useState<number>(() => {
-    const v = Number(localStorage.getItem(AGE_MS_KEY) || 0);
+    const v = Number(localStorage.getItem(sk(AGE_MS_KEY)) || 0);
     return Number.isFinite(v) && v >= 0 ? v : 0;
   });
 
@@ -168,7 +192,7 @@ export default function Tamagotchi({
   const foodAnimRef = useLatest(foodAnim);
   const cleaningRef = useLatest(cleaning);
 
-  // last drawn pet rect for optional anchoring (not used for food anymore)
+  // last drawn pet rect (not used for food anymore, but kept if needed later)
   const petRectRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
 
   const sleepParamsRef = useRef({ useAutoTime, sleepStart, wakeTime, sleepLocked });
@@ -201,13 +225,32 @@ export default function Tamagotchi({
   /** Start timestamp (for catastrophe schedule) */
   const [startTs] = useState<number>(() => {
     try {
-      const raw = localStorage.getItem(START_TS_KEY);
+      const raw = localStorage.getItem(sk(START_TS_KEY));
       if (raw) return Number(raw);
       const now = Date.now();
-      localStorage.setItem(START_TS_KEY, String(now));
+      localStorage.setItem(sk(START_TS_KEY), String(now));
       return now;
     } catch { return Date.now(); }
   });
+
+  /** One-time migration from legacy (non-namespaced) keys */
+  useEffect(() => {
+    try {
+      const hasNs = localStorage.getItem(sk(AGE_MS_KEY));
+      const legacyAge = localStorage.getItem("wg_age_ms_v4");
+      if (!hasNs && legacyAge) {
+        const LEG = (k: string) => localStorage.getItem(k);
+        const SET = (k: string, v: string | null) => { if (v != null) localStorage.setItem(sk(k), v); };
+        SET(AGE_MS_KEY, LEG("wg_age_ms_v4"));
+        SET(LAST_SEEN_KEY, LEG("wg_last_seen_v3"));
+        SET(AGE_MAX_WALL_KEY, LEG("wg_age_max_wall_v2"));
+        SET(POOPS_KEY, LEG("wg_poops_v1"));
+        SET(CATA_SCHEDULE_KEY, LEG("wg_cata_schedule_v2"));
+        SET(CATA_CONSUMED_KEY, LEG("wg_cata_consumed_v2"));
+      }
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [addr]);
 
   /** Sleep checker */
   function isSleepingAt(ts: number) {
@@ -230,8 +273,8 @@ export default function Tamagotchi({
   /** Generate catastrophe schedule */
   useEffect(() => {
     try {
-      const schedRaw = localStorage.getItem(CATA_SCHEDULE_KEY);
-      const consumedRaw = localStorage.getItem(CATA_CONSUMED_KEY);
+      const schedRaw = localStorage.getItem(sk(CATA_SCHEDULE_KEY));
+      const consumedRaw = localStorage.getItem(sk(CATA_CONSUMED_KEY));
       let schedule: number[] = schedRaw ? JSON.parse(schedRaw) : [];
       const consumed: number[] = consumedRaw ? JSON.parse(consumedRaw) : [];
 
@@ -254,8 +297,8 @@ export default function Tamagotchi({
         schedule = [...schedule, ...picks].sort((a, b) => a - b);
       }
 
-      localStorage.setItem(CATA_SCHEDULE_KEY, JSON.stringify(schedule.slice(0, 4)));
-      if (!consumed) localStorage.setItem(CATA_CONSUMED_KEY, JSON.stringify([]));
+      localStorage.setItem(sk(CATA_SCHEDULE_KEY), JSON.stringify(schedule.slice(0, 4)));
+      if (!consumed) localStorage.setItem(sk(CATA_CONSUMED_KEY), JSON.stringify([]));
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startTs]);
@@ -264,21 +307,21 @@ export default function Tamagotchi({
   useEffect(() => {
     try {
       const nowWall = Date.now();
-      const lastWall = Number(localStorage.getItem(LAST_SEEN_KEY) || nowWall);
-      const prevMax = Number(localStorage.getItem(AGE_MAX_WALL_KEY) || lastWall);
+      const lastWall = Number(localStorage.getItem(sk(LAST_SEEN_KEY)) || nowWall);
+      const prevMax = Number(localStorage.getItem(sk(AGE_MAX_WALL_KEY)) || lastWall);
       const wallForElapsed = Math.max(nowWall, prevMax);
       const rawElapsed = wallForElapsed - lastWall;
       const elapsed = Math.max(0, Math.min(rawElapsed, 48 * 3600_000)); // cap 48h
 
       if (elapsed > 0) {
         const minutes = Math.floor(elapsed / 60000);
-        const schedule: number[] = JSON.parse(localStorage.getItem(CATA_SCHEDULE_KEY) || "[]");
-        const consumed: number[] = JSON.parse(localStorage.getItem(CATA_CONSUMED_KEY) || "[]");
+        const schedule: number[] = JSON.parse(localStorage.getItem(sk(CATA_SCHEDULE_KEY)) || "[]");
+        const consumed: number[] = JSON.parse(localStorage.getItem(sk(CATA_CONSUMED_KEY)) || "[]");
 
         const res = simulateOffline({
           startWall: lastWall,
           minutes,
-          startAgeMs: Number(localStorage.getItem(AGE_MS_KEY) || 0),
+          startAgeMs: Number(localStorage.getItem(sk(AGE_MS_KEY)) || 0),
           startStats: { ...statsRef.current },
           startSick: sickRef.current,
           sleepCheck: isSleepingAt,
@@ -292,14 +335,14 @@ export default function Tamagotchi({
 
         if (res.newConsumed.length) {
           const uniq = Array.from(new Set([...consumed, ...res.newConsumed])).sort((a, b) => a - b);
-          localStorage.setItem(CATA_CONSUMED_KEY, JSON.stringify(uniq));
+          localStorage.setItem(sk(CATA_CONSUMED_KEY), JSON.stringify(uniq));
         }
       }
 
-      localStorage.setItem(LAST_SEEN_KEY, String(nowWall));
-      localStorage.setItem(AGE_MAX_WALL_KEY, String(Math.max(prevMax, nowWall)));
+      localStorage.setItem(sk(LAST_SEEN_KEY), String(nowWall));
+      localStorage.setItem(sk(AGE_MAX_WALL_KEY), String(Math.max(prevMax, nowWall)));
     } catch {}
-    // eslint-disable-next-line react-hooks/exfinehaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /** Monotonic age ticker (perf-based) */
@@ -321,10 +364,10 @@ export default function Tamagotchi({
     const save = () => {
       try {
         const now = Date.now();
-        localStorage.setItem(LAST_SEEN_KEY, String(now));
-        const prevMax = Number(localStorage.getItem(AGE_MAX_WALL_KEY) || now);
-        localStorage.setItem(AGE_MAX_WALL_KEY, String(Math.max(prevMax, now)));
-        localStorage.setItem(AGE_MS_KEY, String(ageRef.current));
+        localStorage.setItem(sk(LAST_SEEN_KEY), String(now));
+        const prevMax = Number(localStorage.getItem(sk(AGE_MAX_WALL_KEY)) || now);
+        localStorage.setItem(sk(AGE_MAX_WALL_KEY), String(Math.max(prevMax, now)));
+        localStorage.setItem(sk(AGE_MS_KEY), String(ageRef.current));
       } catch {}
     };
     const id = setInterval(save, 15000);
@@ -336,10 +379,18 @@ export default function Tamagotchi({
       window.removeEventListener("visibilitychange", save);
       window.removeEventListener("pagehide", save);
       window.removeEventListener("beforeunload", save);
-      try { localStorage.setItem(AGE_MS_KEY, String(ageRef.current)); } catch {}
+      try { localStorage.setItem(sk(AGE_MS_KEY), String(ageRef.current)); } catch {}
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /** Persist new keys */
+  useEffect(() => { try { localStorage.setItem(sk(FORM_KEY), JSON.stringify(form)); } catch {} }, [form, addr]);
+  useEffect(() => { try { localStorage.setItem(sk(STATS_KEY), JSON.stringify(stats)); } catch {} }, [stats, addr]);
+  useEffect(() => { try { localStorage.setItem(sk(SICK_KEY), JSON.stringify(isSick)); } catch {} }, [isSick, addr]);
+  useEffect(() => { try { localStorage.setItem(sk(DEAD_KEY), JSON.stringify(isDead)); } catch {} }, [isDead, addr]);
+  useEffect(() => { try { localStorage.setItem(sk(DEATH_REASON_KEY), JSON.stringify(deathReason)); } catch {} }, [deathReason, addr]);
+  useEffect(() => { try { localStorage.setItem(sk(POOPS_KEY), JSON.stringify(poops.slice(-12))); } catch {} }, [poops, addr]);
 
   /** Evolution (equal probability from egg) */
   useEffect(() => {
@@ -359,23 +410,8 @@ export default function Tamagotchi({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ageMs, form]);
 
-  /** Load/save poops */
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(POOPS_KEY);
-      if (raw) {
-        const arr = JSON.parse(raw) as Poop[];
-        if (Array.isArray(arr)) setPoops(arr.slice(0, 12));
-      }
-    } catch {}
-  }, []);
-  useEffect(() => {
-    try { localStorage.setItem(POOPS_KEY, JSON.stringify(poops.slice(-12))); } catch {}
-  }, [poops]);
-
   /** ===== Actions ===== */
   const nowMs = () => Date.now();
-  const [lastHealAt, setLastHealAt] = useState<number>(0);
   const canHeal   = !isDead && nowMs() - lastHealAt   >= HEAL_COOLDOWN_MS;
   const canBurger = !isDead && nowMs() - lastBurgerAt >= FEED_COOLDOWN_MS;
   const canCake   = !isDead && nowMs() - lastCakeAt   >= FEED_COOLDOWN_MS;
@@ -429,22 +465,22 @@ export default function Tamagotchi({
     },
   };
 
-  /** New Game: full reset to first egg (only after death) */
-  const newGame = () => {
-    // Open NFT prompt before actual wipe
-    setShowNFTPrompt(true);
-  };
-
-  /** Actually perform wipe/reset after user closes NFT prompt */
+  /** New Game flow: prompt → reset */
+  const newGame = () => { setShowNFTPrompt(true); };
   const performReset = () => {
     try {
-      localStorage.removeItem(START_TS_KEY);
-      localStorage.removeItem(LAST_SEEN_KEY);
-      localStorage.removeItem(AGE_MS_KEY);
-      localStorage.removeItem(AGE_MAX_WALL_KEY);
-      localStorage.removeItem(POOPS_KEY);
-      localStorage.removeItem(CATA_SCHEDULE_KEY);
-      localStorage.removeItem(CATA_CONSUMED_KEY);
+      localStorage.removeItem(sk(START_TS_KEY));
+      localStorage.removeItem(sk(LAST_SEEN_KEY));
+      localStorage.removeItem(sk(AGE_MS_KEY));
+      localStorage.removeItem(sk(AGE_MAX_WALL_KEY));
+      localStorage.removeItem(sk(POOPS_KEY));
+      localStorage.removeItem(sk(CATA_SCHEDULE_KEY));
+      localStorage.removeItem(sk(CATA_CONSUMED_KEY));
+      localStorage.removeItem(sk(FORM_KEY));
+      localStorage.removeItem(sk(STATS_KEY));
+      localStorage.removeItem(sk(SICK_KEY));
+      localStorage.removeItem(sk(DEAD_KEY));
+      localStorage.removeItem(sk(DEATH_REASON_KEY));
     } catch {}
     setForm("egg");
     setStats({ cleanliness: 0.9, hunger: 0.65, happiness: 0.6, health: 1.0 });
@@ -459,18 +495,18 @@ export default function Tamagotchi({
     setLifeSpentForThisDeath(false);
     const now = Date.now();
     try {
-      localStorage.setItem(START_TS_KEY, String(now));
-      localStorage.setItem(LAST_SEEN_KEY, String(now));
-      localStorage.setItem(AGE_MAX_WALL_KEY, String(now));
+      localStorage.setItem(sk(START_TS_KEY), String(now));
+      localStorage.setItem(sk(LAST_SEEN_KEY), String(now));
+      localStorage.setItem(sk(AGE_MAX_WALL_KEY), String(now));
     } catch {}
   };
 
-  /** Auto-spend 1 life immediately on death (no "Spend 1 life" button shown) */
+  /** Auto-spend 1 life immediately on death (no "Spend 1 life" button) */
   useEffect(() => {
     if (isDead && lives > 0 && !lifeSpentForThisDeath) {
       onLoseLife();
       setLifeSpentForThisDeath(true);
-      // Do not auto-revive. Player still needs to start a New Game explicitly.
+      // Do not auto-revive; user will start a New Game manually.
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDead]);
@@ -486,18 +522,18 @@ export default function Tamagotchi({
 
       // schedule trigger
       try {
-        const schedule: number[] = JSON.parse(localStorage.getItem(CATA_SCHEDULE_KEY) || "[]");
-        const consumed: number[] = JSON.parse(localStorage.getItem(CATA_CONSUMED_KEY) || "[]");
+        const schedule: number[] = JSON.parse(localStorage.getItem(sk(CATA_SCHEDULE_KEY)) || "[]");
+        const consumed: number[] = JSON.parse(localStorage.getItem(sk(CATA_CONSUMED_KEY)) || "[]");
         for (const t of schedule) {
           if (consumed.includes(t)) continue;
           if (now >= t && now < t + CATA_DURATION_MS) {
             if (!isSleepingAt(now)) {
               setCatastrophe({ cause: pickOne(CATASTROPHE_CAUSES), until: t + CATA_DURATION_MS });
-              localStorage.setItem(CATA_CONSUMED_KEY, JSON.stringify([...consumed, t].sort((a,b)=>a-b)));
+              localStorage.setItem(sk(CATA_CONSUMED_KEY), JSON.stringify([...consumed, t].sort((a,b)=>a-b)));
             }
           } else if (now >= t + CATA_DURATION_MS) {
             if (!consumed.includes(t)) {
-              localStorage.setItem(CATA_CONSUMED_KEY, JSON.stringify([...consumed, t].sort((a,b)=>a-b)));
+              localStorage.setItem(sk(CATA_CONSUMED_KEY), JSON.stringify([...consumed, t].sort((a,b)=>a-b)));
             }
           }
         }
@@ -599,7 +635,7 @@ export default function Tamagotchi({
     let dir: 1 | -1 = 1, x = 40;
     let last = performance.now(), frameTimer = 0;
 
-    // Pre-calc egg raw height for world autoscale
+    // Egg raw height for world autoscale
     function getEggRawHeight(): number {
       const eggSet = (catalog as any)["egg"] as AnyAnimSet;
       const eggSrc = (eggSet?.idle?.[0] ?? eggSet?.walk?.[0]) as string | undefined;
@@ -608,7 +644,7 @@ export default function Tamagotchi({
     }
     const eggRawH = getEggRawHeight();
 
-    /** Fixed jitter reducer: integer-aligned X and flip center */
+    /** Fixed jitter reducer for R→L turn */
     let prevDir: 1 | -1 = dir;
 
     const loop = (ts: number) => {
@@ -633,7 +669,7 @@ export default function Tamagotchi({
         bgRect = { x: dx, y: dy, w: dw, h: dh };
       }
 
-      // Food 3-frame animation anchored to BG top-left, with 42px max cap
+      // Food animation anchored to BG top-left, capped to 42px
       if (foodAnimRef.current) {
         const fa = foodAnimRef.current;
         const elapsed = Date.now() - fa.startedAt;
@@ -663,7 +699,7 @@ export default function Tamagotchi({
       // HUD avatar (top-right)
       drawAvatarHUD(ctx, images);
 
-      // World layer
+      // World layer (shifted)
       ctx.save();
       ctx.translate(0, Y_SHIFT);
 
@@ -713,13 +749,9 @@ export default function Tamagotchi({
         else if (x > maxX) { x = maxX; dir = -1; }
       }
 
-      // Fix jitter: integer drawX, and integer flip center when direction flips
+      // Fix jitter: integer X and snap on direction change
       const drawX = Math.floor(x);
-      if (dir !== prevDir) {
-        // Snap x to integer on direction change
-        x = drawX;
-        prevDir = dir;
-      }
+      if (dir !== prevDir) { x = drawX; prevDir = dir; }
 
       // Frame switching
       frameTimer += dt;
@@ -827,7 +859,7 @@ export default function Tamagotchi({
         (ctx2 as any).imageSmoothingEnabled = false;
         ctx2.drawImage(av, ax, ay, aw, ah);
 
-        // Removed extra HUD texts except HP badge
+        // Keep HP badge only
         const hp = Math.round((statsRef.current.health ?? 0) * 100);
         const label = `❤️ ${hp}%`;
         ctx2.font = "10px monospace";
@@ -850,13 +882,11 @@ export default function Tamagotchi({
   const healLeft   = Math.max(0, HEAL_COOLDOWN_MS - (Date.now() - lastHealAt));
 
   /** Copy helper */
-  const copyAddr = async () => {
-    try { await navigator.clipboard.writeText(NFT_CONTRACT); } catch {}
-  };
+  const copyAddr = async () => { try { await navigator.clipboard.writeText(NFT_CONTRACT); } catch {} };
 
   return (
     <div style={{ width: "min(92vw, 100%)", maxWidth: MAX_W, margin: "0 auto" }}>
-      {/* Header with full contract & copy */}
+      {/* Full contract header with copy */}
       <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "center", flexWrap: "wrap", marginBottom: 6 }}>
         <span className="muted">Vault contract (full):</span>
         <code style={{ fontSize: 12 }}>{NFT_CONTRACT}</code>
@@ -877,7 +907,7 @@ export default function Tamagotchi({
           <OverlayCard>
             <div style={{ fontSize: 18, marginBottom: 6 }}>Your pet has died</div>
             {deathReason && <div className="muted" style={{ marginBottom: 10 }}>Cause: {deathReason}</div>}
-            {/* Auto-spent life is silent; no "Spend 1 life" button shown */}
+            {/* No "Spend 1 life" UI — we auto-spend on death if lives>0 */}
             <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
               <button className="btn" onClick={newGame}>🔄 New Game</button>
             </div>
@@ -915,6 +945,9 @@ export default function Tamagotchi({
         </button>
         <button className="btn" onClick={() => setAnim((a) => (a === "walk" ? "idle" : "walk"))}>Toggle Walk/Idle</button>
         <button className="btn btn-primary" onClick={() => setForm(forceEvolve(form))}>⭐ Evolve (debug)</button>
+        <span className="muted" style={{ alignSelf: "center" }}>
+          Poop: {poops.length}
+        </span>
       </div>
 
       {/* Sleep controls */}
@@ -935,9 +968,9 @@ export default function Tamagotchi({
           <button
             className="btn"
             onClick={() => {
-              localStorage.setItem(SLEEP_FROM_KEY, sleepStart);
-              localStorage.setItem(SLEEP_TO_KEY, wakeTime);
-              localStorage.setItem(SLEEP_LOCK_KEY, "1");
+              localStorage.setItem(sk(SLEEP_FROM_KEY), sleepStart);
+              localStorage.setItem(sk(SLEEP_TO_KEY), wakeTime);
+              localStorage.setItem(sk(SLEEP_LOCK_KEY), "1");
               setSleepLocked(true);
               setUseAutoTime(false);
             }}
@@ -979,15 +1012,6 @@ type FoodKind = "burger" | "cake";
 type FoodAnim = { kind: FoodKind; startedAt: number };
 type ScoopState = { x: number; active: boolean };
 
-function prettyName(f: FormKey) {
-  if (String(f).endsWith("_child")) {
-    const base = String(f).replace("_child", "");
-    const cap = base === "we" ? "WE" : (base.charAt(0).toUpperCase() + base.slice(1));
-    return `${cap} (child)`;
-  }
-  return f;
-}
-
 function forceEvolve(f: FormKey): FormKey {
   if (f === "egg") return pickOne(["chog_child","molandak_child","moyaki_child","we_child"] as const) as FormKey;
   if (String(f).endsWith("_child")) {
@@ -1020,6 +1044,9 @@ function drawBanner(ctx: CanvasRenderingContext2D, width: number, text: string) 
   ctx.fillStyle = "rgba(0,0,0,0.55)"; ctx.fillRect(x, 6, w, 18);
   ctx.fillStyle = "white"; ctx.fillText(text, x + pad, y);
   ctx.restore();
+}
+function safeReadJSON<T>(key: string): T | null {
+  try { const raw = localStorage.getItem(key); if (!raw) return null; return JSON.parse(raw) as T; } catch { return null; }
 }
 
 /** Offline minute-by-minute simulation honoring schedule & sleep */
