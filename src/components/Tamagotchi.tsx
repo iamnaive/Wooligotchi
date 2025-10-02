@@ -1,33 +1,36 @@
 // src/components/Tamagotchi.tsx
+// Full drop-in. Comments are in English only.
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { catalog, type FormKey, type AnimSet as AnyAnimSet } from "../game/catalog";
 
-/** ===== Visual & behavior constants ===== */
+/** ===== Constants ===== */
 const DEAD_FALLBACK = "/sprites/dead.png";
 
-/** HUD avatar scale:
- * - If number -> avatar scales DOWN to fit this max size (px, logical). Never scales up.
- * - If null -> avatar is never scaled at all.
- */
-const AVATAR_SCALE_CAP: number | null = 42; // keep pixels crisp, only shrink if too big
+/** Vault / contract (full address + copy) */
+const NFT_CONTRACT = "0x88c78d5852f45935324c6d100052958f694e8446"; // full address, not shortened
 
-/** World sprite scaling (stage, not HUD) */
-const EGG_SCALE = 0.50;     // smaller egg in the world
-const NON_EGG_SCALE = 0.62; // tuned to keep parity vs egg target height
+/** HUD avatar scale cap (logical px). Never upscale. */
+const AVATAR_SCALE_CAP: number | null = 42;
+
+/** World sprite scaling */
+const EGG_SCALE = 0.50;
+const NON_EGG_SCALE = 0.62;
 
 /** Evolution timing */
-const EVOLVE_CHILD_AT = 60_000;             // egg -> child after 1 minute total age
-const EVOLVE_ADULT_AT = 2 * 24 * 3600_000;  // child -> adult after 2 days total age
+const EVOLVE_CHILD_AT = 60_000;             // 1 min
+const EVOLVE_ADULT_AT = 2 * 24 * 3600_000;  // 2 days
 
-/** Asset constants (UI helpers) */
+/** Assets */
 const BG_SRC = "/bg/BG.png";
 const POOP_SRCS = ["/sprites/poop/poop1.png", "/sprites/poop/poop2.png", "/sprites/poop/poop3.png"];
 
-/** Food (3-frame) animation assets */
+/** Food (3-frame) assets */
 const FEED_FRAMES = {
   burger: ["/sprites/ui/food/burger/000.png", "/sprites/ui/food/burger/001.png", "/sprites/ui/food/burger/002.png"],
   cake:   ["/sprites/ui/food/cake/000.png",   "/sprites/ui/food/cake/001.png",   "/sprites/ui/food/cake/002.png"],
 } as const;
+/** Food render cap to match HUD idle cap */
+const FOOD_FRAME_MAX_PX = 42;
 
 /** Scoop (cleaning) sprite */
 const SCOOP_SRC = "/sprites/ui/scoop.png";
@@ -53,11 +56,15 @@ const LOGICAL_W = 320, LOGICAL_H = 180;
 const FPS = 6, WALK_SPEED = 42;
 const MAX_W = 720, CANVAS_H = 360;
 const BAR_H = 6, BASE_GROUND = 48, Y_SHIFT = 26;
+/** Extra offset to lower poops & scoop by 10px (per request) */
+const EXTRA_DOWN = 10;
+
 const HEAL_COOLDOWN_MS = 60_000;
 
 /** Food logic */
 const FEED_COOLDOWN_MS = 5_000;
-const FEED_ANIM_TOTAL_MS = 600;   // 3 frames over 0.6s
+/** 2x slower animation: 1.2s total for 3 frames */
+const FEED_ANIM_TOTAL_MS = 1200;
 const FEED_FRAMES_COUNT = 3;
 const FEED_EFFECTS = {
   burger: { hunger: +0.28, happiness: +0.06 },
@@ -67,9 +74,10 @@ const FEED_EFFECTS = {
 /** Cleaning (scoop) */
 const SCOOP_SPEED_PX_S = 160;
 const SCOOP_CLEAR_RADIUS = 18;
-const SCOOP_HEIGHT_TARGET = 22;
+const SCOOP_HEIGHT_TARGET = 22; // then moved down by EXTRA_DOWN
 const CLEAN_FINISH_CLEANLINESS = 0.95;
 
+/** ===== Component ===== */
 export default function Tamagotchi({
   currentForm,
   lives = 0,
@@ -120,7 +128,7 @@ export default function Tamagotchi({
   const [isSick, setIsSick] = useState(false);
   const [isDead, setIsDead] = useState(false);
   const [deathReason, setDeathReason] = useState<string | null>(null);
-  const [lastHealAt, setLastHealAt] = useState<number>(0);
+  const [lifeSpentForThisDeath, setLifeSpentForThisDeath] = useState<boolean>(false);
 
   /** Food cooldowns & animation */
   const [lastBurgerAt, setLastBurgerAt] = useState<number>(0);
@@ -145,6 +153,9 @@ export default function Tamagotchi({
   /** Catastrophe window */
   const [catastrophe, setCatastrophe] = useState<Catastrophe | null>(null);
 
+  /** UI modals */
+  const [showNFTPrompt, setShowNFTPrompt] = useState<boolean>(false);
+
   /** Stable refs */
   const animRef = useLatest(anim);
   const statsRef = useLatest(stats);
@@ -157,7 +168,7 @@ export default function Tamagotchi({
   const foodAnimRef = useLatest(foodAnim);
   const cleaningRef = useLatest(cleaning);
 
-  // last drawn pet rect for anchoring food frames near head
+  // last drawn pet rect for optional anchoring (not used for food anymore)
   const petRectRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
 
   const sleepParamsRef = useRef({ useAutoTime, sleepStart, wakeTime, sleepLocked });
@@ -212,7 +223,7 @@ export default function Tamagotchi({
     const [wkH, wkM] = (wakeTime || "08:30").split(":").map(n => +n || 0);
     const afterStart = H > ssH || (H === ssH && M >= ssM);
     const beforeWake = H < wkH || (H === wkH && M < wkM);
-    if (ssH > wkH || (ssH === wkH && ssM > wkM)) return afterStart || beforeWake; // crosses midnight
+    if (ssH > wkH || (ssH === wkH && ssM > wkM)) return afterStart || beforeWake;
     return afterStart && beforeWake;
   }
 
@@ -224,16 +235,13 @@ export default function Tamagotchi({
       let schedule: number[] = schedRaw ? JSON.parse(schedRaw) : [];
       const consumed: number[] = consumedRaw ? JSON.parse(consumedRaw) : [];
 
-      // +1 minute catastrophe (idempotent)
       const firstAt = startTs + 60_000;
       if (!schedule.includes(firstAt)) schedule.push(firstAt);
 
-      // Ensure 4 total (1 immediate + 3 day1..day2 while awake)
       if (schedule.length < 4) {
         const day1 = startTs + 24 * 3600_000;
         const day2 = startTs + 48 * 3600_000;
         const need = 4 - schedule.length;
-
         const picks: number[] = [];
         let guard = 0;
         while (picks.length < need && guard++ < 2000) {
@@ -291,7 +299,7 @@ export default function Tamagotchi({
       localStorage.setItem(LAST_SEEN_KEY, String(nowWall));
       localStorage.setItem(AGE_MAX_WALL_KEY, String(Math.max(prevMax, nowWall)));
     } catch {}
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exfinehaustive-deps
   }, []);
 
   /** Monotonic age ticker (perf-based) */
@@ -367,6 +375,7 @@ export default function Tamagotchi({
 
   /** ===== Actions ===== */
   const nowMs = () => Date.now();
+  const [lastHealAt, setLastHealAt] = useState<number>(0);
   const canHeal   = !isDead && nowMs() - lastHealAt   >= HEAL_COOLDOWN_MS;
   const canBurger = !isDead && nowMs() - lastBurgerAt >= FEED_COOLDOWN_MS;
   const canCake   = !isDead && nowMs() - lastCakeAt   >= FEED_COOLDOWN_MS;
@@ -420,28 +429,14 @@ export default function Tamagotchi({
     },
   };
 
-  /** Revive (spend life) */
-  const spendLifeToRevive = () => {
-    if (lives <= 0) return;
-    onLoseLife();
-    setIsDead(false);
-    setDeathReason(null);
-    setStats((s) =>
-      clampStats({
-        cleanliness: Math.max(s.cleanliness, 0.7),
-        hunger: 0.4,
-        happiness: Math.max(s.happiness, 0.5),
-        health: Math.max(s.health, 0.6),
-      })
-    );
-    setPoops([]);
-    setIsSick(false);
-    setCatastrophe(null);
-  };
-
   /** New Game: full reset to first egg (only after death) */
   const newGame = () => {
-    if (!deadRef.current) return;
+    // Open NFT prompt before actual wipe
+    setShowNFTPrompt(true);
+  };
+
+  /** Actually perform wipe/reset after user closes NFT prompt */
+  const performReset = () => {
     try {
       localStorage.removeItem(START_TS_KEY);
       localStorage.removeItem(LAST_SEEN_KEY);
@@ -461,6 +456,7 @@ export default function Tamagotchi({
     setAgeMs(0);
     setFoodAnim(null);
     setCleaning(null);
+    setLifeSpentForThisDeath(false);
     const now = Date.now();
     try {
       localStorage.setItem(START_TS_KEY, String(now));
@@ -468,6 +464,16 @@ export default function Tamagotchi({
       localStorage.setItem(AGE_MAX_WALL_KEY, String(now));
     } catch {}
   };
+
+  /** Auto-spend 1 life immediately on death (no "Spend 1 life" button shown) */
+  useEffect(() => {
+    if (isDead && lives > 0 && !lifeSpentForThisDeath) {
+      onLoseLife();
+      setLifeSpentForThisDeath(true);
+      // Do not auto-revive. Player still needs to start a New Game explicitly.
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDead]);
 
   /** Drains / events / illness loop */
   useEffect(() => {
@@ -593,7 +599,7 @@ export default function Tamagotchi({
     let dir: 1 | -1 = 1, x = 40;
     let last = performance.now(), frameTimer = 0;
 
-    // Egg raw height for world autoscale
+    // Pre-calc egg raw height for world autoscale
     function getEggRawHeight(): number {
       const eggSet = (catalog as any)["egg"] as AnyAnimSet;
       const eggSrc = (eggSet?.idle?.[0] ?? eggSet?.walk?.[0]) as string | undefined;
@@ -601,6 +607,9 @@ export default function Tamagotchi({
       return eggImg ? eggImg.height : 32;
     }
     const eggRawH = getEggRawHeight();
+
+    /** Fixed jitter reducer: integer-aligned X and flip center */
+    let prevDir: 1 | -1 = dir;
 
     const loop = (ts: number) => {
       rafRef.current = requestAnimationFrame(loop);
@@ -613,6 +622,7 @@ export default function Tamagotchi({
 
       // BG
       const bg = images[BG_SRC];
+      let bgRect = { x: 0, y: 0, w: LOGICAL_W, h: LOGICAL_H };
       if (bg) {
         const scaleBG = Math.max(LOGICAL_W / bg.width, LOGICAL_H / bg.height);
         const dw = Math.floor(bg.width * scaleBG);
@@ -620,22 +630,50 @@ export default function Tamagotchi({
         const dx = Math.floor((LOGICAL_W - dw) / 2);
         const dy = Math.floor((LOGICAL_H - dh) / 2);
         ctx.drawImage(bg, dx, dy, dw, dh);
+        bgRect = { x: dx, y: dy, w: dw, h: dh };
       }
 
-      // --- HUD Avatar (top-right) ---
+      // Food 3-frame animation anchored to BG top-left, with 42px max cap
+      if (foodAnimRef.current) {
+        const fa = foodAnimRef.current;
+        const elapsed = Date.now() - fa.startedAt;
+        if (elapsed >= FEED_ANIM_TOTAL_MS) {
+          if (foodAnimRef.current) setFoodAnim(null);
+        } else {
+          const frames = FEED_FRAMES[fa.kind];
+          const frameIdx = Math.min(FEED_FRAMES_COUNT - 1, Math.floor((elapsed / FEED_ANIM_TOTAL_MS) * FEED_FRAMES_COUNT));
+          const src = frames[frameIdx];
+          const img = images[src];
+          const pad = 6;
+          const fx = bgRect.x + pad;
+          const fy = bgRect.y + pad;
+          if (img) {
+            const nMax = Math.max(img.width, img.height);
+            const scale = nMax > FOOD_FRAME_MAX_PX ? (FOOD_FRAME_MAX_PX / nMax) : 1;
+            const w = Math.round(img.width * scale);
+            const h = Math.round(img.height * scale);
+            ctx.drawImage(img, Math.round(fx), Math.round(fy), w, h);
+          } else {
+            ctx.font = "16px monospace";
+            ctx.fillText(fa.kind === "burger" ? "🍔" : "🎂", Math.round(fx), Math.round(fy + 14));
+          }
+        }
+      }
+
+      // HUD avatar (top-right)
       drawAvatarHUD(ctx, images);
 
-      // World layer (shifted down)
+      // World layer
       ctx.save();
       ctx.translate(0, Y_SHIFT);
 
-      // Poops
+      // Poops (lowered by EXTRA_DOWN)
       const curPoops = poopsRef.current;
       if (curPoops.length) {
         for (const p of curPoops) {
           const img = images[p.src];
           const px = Math.round(p.x);
-          const py = Math.round(LOGICAL_H - BASE_GROUND - 6);
+          const py = Math.round(LOGICAL_H - BASE_GROUND - 6 + EXTRA_DOWN);
           if (img) ctx.drawImage(img, px, py - 12, 12, 12);
           else { ctx.font = "10px monospace"; ctx.fillText("💩", px, py); }
         }
@@ -675,6 +713,14 @@ export default function Tamagotchi({
         else if (x > maxX) { x = maxX; dir = -1; }
       }
 
+      // Fix jitter: integer drawX, and integer flip center when direction flips
+      const drawX = Math.floor(x);
+      if (dir !== prevDir) {
+        // Snap x to integer on direction change
+        x = drawX;
+        prevDir = dir;
+      }
+
       // Frame switching
       frameTimer += dt;
       if (frameTimer > 1e6) frameTimer %= 1e6;
@@ -699,12 +745,12 @@ export default function Tamagotchi({
         }
       } else if (frames.length) {
         ctx.save();
-        // Face movement direction (flip on moving left)
         if (dir === -1) {
-          const cx = Math.round(x + drawW / 2);
+          const cx = Math.floor(drawX + drawW / 2); // integer center
           ctx.translate(cx, 0); ctx.scale(-1, 1); ctx.translate(-cx, 0);
         }
-        const ix = Math.round(x), iy = Math.round(LOGICAL_H - BASE_GROUND - drawH);
+        const ix = drawX;
+        const iy = Math.round(LOGICAL_H - BASE_GROUND - drawH);
         const img = images[frames[Math.min(frameIndex, frames.length - 1)]];
         if (img) ctx.drawImage(img, ix, iy, drawW, drawH);
         ctx.restore();
@@ -713,14 +759,14 @@ export default function Tamagotchi({
         petRectRef.current = null;
       }
 
-      // Cleaning (scoop pass)
+      // Cleaning (scoop pass) — lowered by EXTRA_DOWN
       if (cleaningRef.current && cleaningRef.current.active) {
         const s = cleaningRef.current;
         s.x -= (SCOOP_SPEED_PX_S * dt) / 1000; // move left
         const scoopImg = images[SCOOP_SRC];
         const scoopH = SCOOP_HEIGHT_TARGET;
         const scoopW = scoopImg ? Math.round((scoopImg.width / Math.max(1, scoopImg.height)) * scoopH) : 26;
-        const y = Math.round(LOGICAL_H - BASE_GROUND - scoopH + 2);
+        const y = Math.round(LOGICAL_H - BASE_GROUND - scoopH + 2 + EXTRA_DOWN);
         if (scoopImg) ctx.drawImage(scoopImg, Math.round(s.x), y, scoopW, scoopH);
         else { ctx.fillStyle = "#c7cbe8"; ctx.fillRect(Math.round(s.x), y, scoopW, scoopH); ctx.font = "12px monospace"; ctx.fillStyle = "#111"; ctx.fillText("🧹", Math.round(s.x) + 6, y + scoopH - 6); }
         const frontX = s.x + scoopW * 0.5;
@@ -736,31 +782,6 @@ export default function Tamagotchi({
       const cat = catastropheRef.current;
       if (cat && now < cat.until) drawBanner(ctx, LOGICAL_W, `⚠ ${cat.cause}! stats draining fast`);
       if (!deadRef.current && sleepingNow) drawBanner(ctx, LOGICAL_W, "😴 Sleeping");
-
-      // Food throw (3 frames near head)
-      if (foodAnimRef.current) {
-        const fa = foodAnimRef.current;
-        const elapsed = Date.now() - fa.startedAt;
-        if (elapsed >= FEED_ANIM_TOTAL_MS) {
-          if (foodAnimRef.current) setFoodAnim(null);
-        } else {
-          const frames = FEED_FRAMES[fa.kind];
-          const frameIdx = Math.min(FEED_FRAMES_COUNT - 1, Math.floor((elapsed / FEED_ANIM_TOTAL_MS) * FEED_FRAMES_COUNT));
-          const src = frames[frameIdx];
-          const img = images[src];
-          const target = petRectRef.current;
-          const baseX = target ? target.x + target.w * 0.4 : LOGICAL_W * 0.48;
-          const baseY = target ? target.y - 12 : 26;
-          if (img) {
-            const w = Math.round(img.width * 0.5);
-            const h = Math.round(img.height * 0.5);
-            ctx.drawImage(img, Math.round(baseX), Math.round(baseY), w, h);
-          } else {
-            ctx.font = "16px monospace";
-            ctx.fillText(fa.kind === "burger" ? "🍔" : "🎂", Math.round(baseX), Math.round(baseY));
-          }
-        }
-      }
 
       ctx.restore(); // world
     };
@@ -791,7 +812,6 @@ export default function Tamagotchi({
       if (avatarSrc && images2[avatarSrc]) {
         const av = images2[avatarSrc];
 
-        // scale DOWN only if larger than cap
         let aw = av.width, ah = av.height;
         if (typeof AVATAR_SCALE_CAP === "number") {
           const nativeMax = Math.max(av.width, av.height);
@@ -807,6 +827,7 @@ export default function Tamagotchi({
         (ctx2 as any).imageSmoothingEnabled = false;
         ctx2.drawImage(av, ax, ay, aw, ah);
 
+        // Removed extra HUD texts except HP badge
         const hp = Math.round((statsRef.current.health ?? 0) * 100);
         const label = `❤️ ${hp}%`;
         ctx2.font = "10px monospace";
@@ -823,13 +844,25 @@ export default function Tamagotchi({
     }
   }
 
-  /** UI */
+  /** UI timers */
   const burgerLeft = Math.max(0, FEED_COOLDOWN_MS - (Date.now() - lastBurgerAt));
   const cakeLeft   = Math.max(0, FEED_COOLDOWN_MS - (Date.now() - lastCakeAt));
   const healLeft   = Math.max(0, HEAL_COOLDOWN_MS - (Date.now() - lastHealAt));
 
+  /** Copy helper */
+  const copyAddr = async () => {
+    try { await navigator.clipboard.writeText(NFT_CONTRACT); } catch {}
+  };
+
   return (
     <div style={{ width: "min(92vw, 100%)", maxWidth: MAX_W, margin: "0 auto" }}>
+      {/* Header with full contract & copy */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "center", flexWrap: "wrap", marginBottom: 6 }}>
+        <span className="muted">Vault contract (full):</span>
+        <code style={{ fontSize: 12 }}>{NFT_CONTRACT}</code>
+        <button className="btn" onClick={copyAddr}>Copy</button>
+      </div>
+
       {/* Canvas */}
       <div
         ref={wrapRef}
@@ -843,13 +876,14 @@ export default function Tamagotchi({
         {isDead && (
           <OverlayCard>
             <div style={{ fontSize: 18, marginBottom: 6 }}>Your pet has died</div>
-            {deathReason && <div className="muted" style={{ marginBottom: 6 }}>Cause: {deathReason}</div>}
-            <div className="muted" style={{ marginBottom: 12 }}>Lives left: <b>{lives}</b></div>
+            {deathReason && <div className="muted" style={{ marginBottom: 10 }}>Cause: {deathReason}</div>}
+            {/* Auto-spent life is silent; no "Spend 1 life" button shown */}
             <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
-              {lives > 0 && <button className="btn btn-primary" onClick={spendLifeToRevive}>Spend 1 life to revive</button>}
               <button className="btn" onClick={newGame}>🔄 New Game</button>
             </div>
-            {lives <= 0 && <div className="muted" style={{ marginTop: 8 }}>Transfer 1 NFT to get a life (or start a New Game).</div>}
+            <div className="muted" style={{ marginTop: 10, fontSize: 12, opacity: 0.85 }}>
+              Tip: send 1 NFT to the vault to add a life.
+            </div>
           </OverlayCard>
         )}
       </div>
@@ -879,10 +913,8 @@ export default function Tamagotchi({
         <button className="btn" onClick={act.clean} disabled={!canClean || poops.length === 0}>
           🧻 Clean{cleaning ? " (running...)" : ""}
         </button>
+        <button className="btn" onClick={() => setAnim((a) => (a === "walk" ? "idle" : "walk"))}>Toggle Walk/Idle</button>
         <button className="btn btn-primary" onClick={() => setForm(forceEvolve(form))}>⭐ Evolve (debug)</button>
-        <span className="muted" style={{ alignSelf: "center" }}>
-          Poop: {poops.length} | Form: {prettyName(form)} {isSick ? " | 🤒 Sick" : ""} {catastrophe && Date.now() < catastrophe.until ? " | ⚠ Event" : ""} | Age: {(ageMs/1000|0)}s
-        </span>
       </div>
 
       {/* Sleep controls */}
@@ -916,6 +948,24 @@ export default function Tamagotchi({
           <span className="muted">Sleep window locked</span>
         )}
       </div>
+
+      {/* NFT prompt on New Game click */}
+      {showNFTPrompt && (
+        <OverlayCard>
+          <div style={{ fontSize: 16, marginBottom: 10 }}>Add a life by sending 1 NFT</div>
+          <div className="muted" style={{ marginBottom: 8 }}>Send to vault contract (full):</div>
+          <code style={{ fontSize: 12, marginBottom: 8, display: "block" }}>{NFT_CONTRACT}</code>
+          <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 12 }}>
+            <button className="btn" onClick={copyAddr}>Copy address</button>
+            <button className="btn" onClick={() => setShowNFTPrompt(false)}>I sent it</button>
+          </div>
+          <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+            <button className="btn btn-primary" onClick={() => { setShowNFTPrompt(false); performReset(); }}>
+              Start New Game
+            </button>
+          </div>
+        </OverlayCard>
+      )}
     </div>
   );
 }
