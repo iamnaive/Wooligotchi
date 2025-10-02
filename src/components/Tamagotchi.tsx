@@ -12,6 +12,7 @@ const DEAD_FALLBACK = "/sprites/dead.png";
  */
 const EGG_SCALE = 0.7;      // egg ~30% smaller than native
 const NON_EGG_SCALE = 0.6;  // non-egg ~1.67x smaller than egg-height target
+const INVERT_WALK_FACING = false;
 
 /** Evolution timing */
 const EVOLVE_CHILD_AT = 60_000;             // egg -> child after 1 minute of total age
