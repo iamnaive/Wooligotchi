@@ -92,7 +92,10 @@ function useLivesGate(chainId:number|undefined, address?:`0x${string}`|null){
     const onCustom = ()=> setLives(getLivesLocal(cid, address));
     window.addEventListener('storage', onStorage);
     window.addEventListener('wg:lives-changed', onCustom as any);
-    return ()=>{ window.removeEventListener('storage', onStorage); window.removeEventListener('wg:lives-changed', onCustom as any); };
+    return ()=>{
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('wg:lives-changed', onCustom as any);
+    };
   }, [chainId, address]);
   return lives;
 }
@@ -151,7 +154,7 @@ function nextFormRandom(current: FormKey): FormKey {
   return map[current] ?? current;
 }
 
-/* ===== Error Boundary (ловим любые падения) ===== */
+/* ===== Error Boundary ===== */
 class ErrorBoundary extends React.Component<{children: React.ReactNode},{err: any}> {
   constructor(props:any){ super(props); this.state = { err: null }; }
   static getDerivedStateFromError(err:any){ return { err }; }
@@ -308,14 +311,15 @@ function AppInner() {
       {gate === "game" && (
         <ErrorBoundary>
           <div style={{maxWidth:980, margin:"0 auto"}}>
-            {/* маленький заголовок для уверенности что блок смонтирован */}
             <div className="muted" style={{margin:"8px 0"}}>Game mounted · form: {form}</div>
             <GameProvider config={petConfig}>
               <Tamagotchi
+                key={address || 'no-wallet'}            // важно для переключения неймспейса
                 currentForm={form}
                 onEvolve={evolve}
                 lives={lives}
                 onLoseLife={() => spendOneLife(chainId, address)}
+                walletAddress={address || undefined}    // адрес уходит внутрь для localStorage-неймспейса
               />
             </GameProvider>
           </div>
@@ -334,7 +338,13 @@ function AppInner() {
               <div className="title" style={{ fontSize: 20, marginBottom: 10, color: "white" }}>Connect a wallet</div>
               <div className="wallet-grid">
                 {walletItems.map((i) => (
-                  <button key={i.id} onClick={() => pickWallet(i.id)} disabled={connectStatus === "pending"} className="btn btn-ghost" style={{ width: "100%" }}>
+                  <button
+                    key={i.id}
+                    onClick={() => pickWallet(i.id)}
+                    disabled={connectStatus === "pending"}
+                    className="btn btn-ghost"
+                    style={{ width: "100%" }}
+                  >
                     {i.label}
                   </button>
                 ))}
