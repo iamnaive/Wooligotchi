@@ -2,27 +2,27 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { catalog, type FormKey, type AnimSet as AnyAnimSet } from "../game/catalog";
 
-/** ===== Module-level constants ===== */
+/** ===== Visual & behavior constants ===== */
 const DEAD_FALLBACK = "/sprites/dead.png";
 
-/** Visual scaling:
- * - EGG_SCALE shrinks only the egg
- * - NON_EGG_SCALE shrinks all non-egg forms relative to the egg's raw frame height
- * - INVERT_WALK_FACING makes sprite face the movement direction if source art faces left
+/** Scaling:
+ * - EGG_SCALE shrinks only the egg (native sprite -> multiplied by this factor).
+ * - NON_EGG_SCALE shrinks non-egg forms relative to the egg's raw height.
+ * - INVERT_WALK_FACING flips sprite so it faces movement direction if source art faces left.
  */
-const EGG_SCALE = 0.7;      // 0.7 ≈ egg 30% smaller
-const NON_EGG_SCALE = 0.6;  // ~1.67x smaller than egg height; tweak if needed
+const EGG_SCALE = 0.7;      // egg ~30% smaller than native
+const NON_EGG_SCALE = 0.6;  // non-egg ~1.67x smaller than egg-height target
 const INVERT_WALK_FACING = true;
 
 /** Evolution timing */
-const EVOLVE_CHILD_AT = 60_000;             // egg -> child after 1 minute (total age)
-const EVOLVE_ADULT_AT = 2 * 24 * 3600_000;  // child -> adult after 2 days (total age)
+const EVOLVE_CHILD_AT = 60_000;             // egg -> child after 1 minute of total age
+const EVOLVE_ADULT_AT = 2 * 24 * 3600_000;  // child -> adult after 2 days of total age
 
 /** Asset constants */
 const BG_SRC = "/bg/BG.png";
 const POOP_SRCS = ["/sprites/poop/poop1.png", "/sprites/poop/poop2.png", "/sprites/poop/poop3.png"];
 
-/** LocalStorage keys */
+/** Storage keys */
 const START_TS_KEY = "wg_start_ts_v2";
 const LAST_SEEN_KEY = "wg_last_seen_v3";
 const AGE_MS_KEY = "wg_age_ms_v4";
@@ -32,12 +32,10 @@ const SLEEP_LOCK_KEY = "wg_sleep_lock_v1";
 const SLEEP_FROM_KEY = "wg_sleep_from_v1";
 const SLEEP_TO_KEY = "wg_sleep_to_v1";
 
-/** Catastrophe scheduling (absolute minutes, UTC ms) */
-const CATA_SCHEDULE_KEY = "wg_cata_schedule_v2"; // JSON:number[] (start times)
-const CATA_CONSUMED_KEY = "wg_cata_consumed_v2"; // JSON:number[] (already applied)
-
-/** Catastrophe behavior */
-const CATA_DURATION_MS = 60_000; // 1 minute
+/** Catastrophes schedule (absolute UTC ms) */
+const CATA_SCHEDULE_KEY = "wg_cata_schedule_v2"; // JSON:number[] planned start times
+const CATA_CONSUMED_KEY = "wg_cata_consumed_v2"; // JSON:number[] executed start times
+const CATA_DURATION_MS = 60_000; // 1 minute visually + fast drain
 const CATASTROPHE_CAUSES = ["food poisoning", "mysterious flu", "meteor dust", "bad RNG", "doom day syndrome"] as const;
 
 export default function Tamagotchi({
@@ -58,7 +56,7 @@ export default function Tamagotchi({
   const BAR_H = 6, BASE_GROUND = 48, Y_SHIFT = 26;
   const HEAL_COOLDOWN_MS = 60_000;
 
-  /** Form names */
+  /** Forms */
   const CHILD_CHOICES: FormKey[] = ["chog_child", "molandak_child", "moyaki_child", "we_child"];
   const ADULT_MAP: Record<string, FormKey> = {
     chog_child: "Chog",
@@ -67,7 +65,7 @@ export default function Tamagotchi({
     we_child: "WE",
   };
 
-  /** Normalize any legacy names to your new names */
+  /** Normalize any legacy names */
   const normalizeForm = (f: string): FormKey => {
     const map: Record<string, FormKey> = {
       char1: "chog_child",       char1_adult: "Chog",
@@ -90,7 +88,7 @@ export default function Tamagotchi({
   const [deathReason, setDeathReason] = useState<string | null>(null);
   const [lastHealAt, setLastHealAt] = useState<number>(0);
 
-  /** Sleep window (auto unless locked once) */
+  /** Sleep window */
   const [useAutoTime, setUseAutoTime] = useState<boolean>(() => !localStorage.getItem(SLEEP_LOCK_KEY));
   const [sleepStart, setSleepStart] = useState<string>(() => localStorage.getItem(SLEEP_FROM_KEY) || "22:00");
   const [wakeTime, setWakeTime] = useState<string>(() => localStorage.getItem(SLEEP_TO_KEY) || "08:30");
@@ -102,10 +100,10 @@ export default function Tamagotchi({
     return Number.isFinite(v) && v >= 0 ? v : 0;
   });
 
-  /** Current catastrophe window (visual + fast drain) */
+  /** Current catastrophe window */
   const [catastrophe, setCatastrophe] = useState<Catastrophe | null>(null);
 
-  /** Stable refs (for intervals/RAF) */
+  /** Stable refs */
   const animRef = useLatest(anim);
   const statsRef = useLatest(stats);
   const sickRef = useLatest(isSick);
@@ -117,10 +115,10 @@ export default function Tamagotchi({
   const sleepParamsRef = useRef({ useAutoTime, sleepStart, wakeTime, sleepLocked });
   useEffect(() => { sleepParamsRef.current = { useAutoTime, sleepStart, wakeTime, sleepLocked }; }, [useAutoTime, sleepStart, wakeTime, sleepLocked]);
 
-  /** Canvas refs */
+  /** Canvas & RAF */
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const rafRef = useRef<number | null>(null); // per-instance RAF id (prevents stacked loops)
+  const rafRef = useRef<number | null>(null); // prevents stacked loops
 
   /** Catalog / frames */
   const safeForm = (f: FormKey) => (catalog[f] ? f : ("egg" as FormKey));
@@ -133,13 +131,13 @@ export default function Tamagotchi({
     (["idle","walk","sick","sad","unhappy","sleep"] as AnimKey[]).forEach(k => (def[k] ?? []).forEach(u => set.add(u)));
     POOP_SRCS.forEach(u => set.add(u));
     deadCandidates(form).forEach(u => set.add(u));
-    // also preload egg frames for autoscale target
+    // preload egg frames for autoscale reference
     const egg = catalog["egg"] || {};
     (egg.idle ?? egg.walk ?? []).forEach(u => set.add(u));
     return Array.from(set);
   }, [def, form]);
 
-  /** Start timestamp of the life (used to place catastrophe schedule) */
+  /** Start timestamp (for catastrophe schedule) */
   const [startTs] = useState<number>(() => {
     try {
       const raw = localStorage.getItem(START_TS_KEY);
@@ -150,7 +148,7 @@ export default function Tamagotchi({
     } catch { return Date.now(); }
   });
 
-  /** Sleep checker for any timestamp */
+  /** Sleep checker */
   function isSleepingAt(ts: number) {
     const { useAutoTime, sleepLocked, sleepStart, wakeTime } = sleepParamsRef.current;
     const d = new Date(ts);
@@ -164,14 +162,13 @@ export default function Tamagotchi({
     const [wkH, wkM] = (wakeTime || "08:30").split(":").map(n => +n || 0);
     const afterStart = H > ssH || (H === ssH && M >= ssM);
     const beforeWake = H < wkH || (H === wkH && M < wkM);
-    if (ssH > wkH || (ssH === wkH && ssM > wkM)) return afterStart || beforeWake; // window crosses midnight
+    if (ssH > wkH || (ssH === wkH && ssM > wkM)) return afterStart || beforeWake; // crosses midnight
     return afterStart && beforeWake;
   }
 
   /** Generate catastrophe schedule:
-   * - First catastrophe at (startTs + 1 minute) — 100%
-   * - Exactly 3 catastrophes in [startTs+1d, startTs+2d), planned only during awake time
-   * All are guaranteed; after they occur, no more catastrophes.
+   * - First at startTs + 1 minute (100%).
+   * - Exactly 3 more in [startTs+1d, startTs+2d), only while awake.
    */
   useEffect(() => {
     try {
@@ -180,7 +177,7 @@ export default function Tamagotchi({
       let schedule: number[] = schedRaw ? JSON.parse(schedRaw) : [];
       const consumed: number[] = consumedRaw ? JSON.parse(consumedRaw) : [];
 
-      // Place the +1 minute catastrophe (idempotent)
+      // +1 minute catastrophe (idempotent)
       const firstAt = startTs + 60_000;
       if (!schedule.includes(firstAt)) schedule.push(firstAt);
 
@@ -195,7 +192,7 @@ export default function Tamagotchi({
         while (picks.length < need && guard++ < 2000) {
           const t = randInt(day1, day2 - CATA_DURATION_MS);
           const minute = Math.floor(t / 60_000) * 60_000;
-          if (isSleepingAt(minute)) continue;         // don't schedule during sleep
+          if (isSleepingAt(minute)) continue;                // schedule only while awake
           if (schedule.includes(minute) || picks.includes(minute)) continue;
           picks.push(minute);
         }
@@ -208,7 +205,7 @@ export default function Tamagotchi({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startTs]);
 
-  /** Offline catch-up for age/stats/illness/catastrophes with anti-rewind */
+  /** Offline catch-up (age/stats/illness/catastrophes) + anti-rewind */
   useEffect(() => {
     try {
       const nowWall = Date.now();
@@ -250,7 +247,7 @@ export default function Tamagotchi({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** Online age ticker (perf-based; independent from system clock) */
+  /** Online age ticker (perf-based, independent from system clock) */
   useEffect(() => {
     let lastPerf = performance.now();
     const id = window.setInterval(() => {
@@ -264,7 +261,7 @@ export default function Tamagotchi({
     return () => clearInterval(id);
   }, []);
 
-  /** Persist often (including anti-rewind watermark) */
+  /** Persist often + anti-rewind watermark */
   useEffect(() => {
     const save = () => {
       try {
@@ -289,10 +286,9 @@ export default function Tamagotchi({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** Evolution (works even if parent doesn't update prop) */
+  /** Evolution (equal probability from egg) */
   useEffect(() => {
     if (formRef.current === "egg" && ageRef.current >= EVOLVE_CHILD_AT) {
-      // equal probability to each child
       const next = pickOne(CHILD_CHOICES);
       onEvolve?.(next);
       setForm(next);
@@ -305,7 +301,7 @@ export default function Tamagotchi({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ageMs, form]);
 
-  /** Periodic drains / illness / poop / online catastrophe trigger */
+  /** Periodic drains / illness / poop + online catastrophe triggering */
   useEffect(() => {
     let lastWall = Date.now();
     const id = window.setInterval(() => {
@@ -314,7 +310,7 @@ export default function Tamagotchi({
       lastWall = now;
       if (deadRef.current) return;
 
-      // online trigger for scheduled catastrophes (if minute window reached and not sleeping)
+      // trigger scheduled catastrophes when window hits (if awake)
       try {
         const schedule: number[] = JSON.parse(localStorage.getItem(CATA_SCHEDULE_KEY) || "[]");
         const consumed: number[] = JSON.parse(localStorage.getItem(CATA_CONSUMED_KEY) || "[]");
@@ -326,7 +322,7 @@ export default function Tamagotchi({
               localStorage.setItem(CATA_CONSUMED_KEY, JSON.stringify([...consumed, t].sort((a,b)=>a-b)));
             }
           } else if (now >= t + CATA_DURATION_MS) {
-            // safety: if window passed while online and not marked (rare)
+            // safety mark if minute passed and wasn't marked (rare)
             if (!consumed.includes(t)) {
               localStorage.setItem(CATA_CONSUMED_KEY, JSON.stringify([...consumed, t].sort((a,b)=>a-b)));
             }
@@ -374,7 +370,7 @@ export default function Tamagotchi({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** Load/save poops */
+  /** Poops load/save */
   useEffect(() => {
     try {
       const raw = localStorage.getItem(POOPS_KEY);
@@ -413,7 +409,7 @@ export default function Tamagotchi({
     },
   };
 
-  /** Spend one life to revive (keeps progress) */
+  /** Spend life to revive (keeps progress) */
   const spendLifeToRevive = () => {
     if (lives <= 0) return;
     onLoseLife();
@@ -432,10 +428,9 @@ export default function Tamagotchi({
     setCatastrophe(null);
   };
 
-  /** Start a fresh new game (after death) — full reset to first egg */
+  /** New Game: full reset back to the first egg (after death) */
   const newGame = () => {
     try {
-      // wipe storage
       localStorage.removeItem(START_TS_KEY);
       localStorage.removeItem(LAST_SEEN_KEY);
       localStorage.removeItem(AGE_MS_KEY);
@@ -443,9 +438,8 @@ export default function Tamagotchi({
       localStorage.removeItem(POOPS_KEY);
       localStorage.removeItem(CATA_SCHEDULE_KEY);
       localStorage.removeItem(CATA_CONSUMED_KEY);
-      // keep sleep settings as user's preference (do NOT wipe sleep window)
+      // keep sleep preferences (do not wipe sleep window)
     } catch {}
-    // reset all runtime state
     setForm("egg");
     setStats({ cleanliness: 0.9, hunger: 0.65, happiness: 0.6, health: 1.0 });
     setPoops([]);
@@ -454,7 +448,6 @@ export default function Tamagotchi({
     setDeathReason(null);
     setCatastrophe(null);
     setAgeMs(0);
-    // set a fresh start timestamp
     const now = Date.now();
     try {
       localStorage.setItem(START_TS_KEY, String(now));
@@ -473,7 +466,7 @@ export default function Tamagotchi({
     });
   }
 
-  /** Render loop: single per-instance RAF; autoscale; proper facing; sick & dead rendering */
+  /** ===== Render loop (single per-instance RAF) ===== */
   useEffect(() => {
     let alive = true;
     const urlsFull = Array.from(new Set([...urls, BG_SRC]));
@@ -502,7 +495,7 @@ export default function Tamagotchi({
     if (!ctx) return;
     (ctx as any).imageSmoothingEnabled = false;
 
-    // size/DPR
+    // Size/DPR
     const resize = () => {
       const dpr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
       const containerW = wrap.clientWidth || LOGICAL_W;
@@ -529,7 +522,7 @@ export default function Tamagotchi({
     let dir: 1 | -1 = 1, x = 40;
     let last = performance.now(), frameTimer = 0;
 
-    // Target world height is egg raw height (we then apply EGG_SCALE or NON_EGG_SCALE)
+    // Egg raw height for world autoscale
     function getEggRawHeight(): number {
       const eggSet = (catalog as any)["egg"] as AnyAnimSet;
       const eggSrc = (eggSet?.idle?.[0] ?? eggSet?.walk?.[0]) as string | undefined;
@@ -544,10 +537,10 @@ export default function Tamagotchi({
       const dt = Math.min(100, ts - last);
       last = ts;
 
-      // clear
+      // Clear
       ctx.clearRect(0, 0, LOGICAL_W, LOGICAL_H);
 
-      // background
+      // BG
       const bg = images[BG_SRC];
       if (bg) {
         const scaleBG = Math.max(LOGICAL_W / bg.width, LOGICAL_H / bg.height);
@@ -558,7 +551,7 @@ export default function Tamagotchi({
         ctx.drawImage(bg, dx, dy, dw, dh);
       }
 
-      // top-right avatar (sick/sleep indicators)
+      // --- Top-right avatar (draw at native sprite size, no autoscale) ---
       const now = Date.now();
       const sleepingNow = isSleepingAt(now);
       const avatarAnimKey: AnimKey = (() => {
@@ -572,11 +565,16 @@ export default function Tamagotchi({
       const avatarSrc = avatarFrames[0];
       if (avatarSrc && images[avatarSrc]) {
         const av = images[avatarSrc];
-        const aw = 40, ah = 40;
-        const padX = 10, padY = 4;
-        const ax = LOGICAL_W - padX - aw, ay = padY;
+        // native size (no 40x40)
+        const aw = av.width;
+        const ah = av.height;
+        const padX = 10, padY = 6;
+        const ax = LOGICAL_W - padX - aw;
+        const ay = padY;
         (ctx as any).imageSmoothingEnabled = false;
         ctx.drawImage(av, ax, ay, aw, ah);
+
+        // HP badge
         const hp = Math.round((statsRef.current.health ?? 0) * 100);
         const label = `❤️ ${hp}%`;
         ctx.font = "10px monospace";
@@ -591,11 +589,11 @@ export default function Tamagotchi({
         ctx.fillText(label, tx, ty);
       }
 
-      // shifted world layer
+      // World layer (shifted down)
       ctx.save();
       ctx.translate(0, Y_SHIFT);
 
-      // poops
+      // Poops
       const curPoops = poopsRef.current;
       if (curPoops.length) {
         for (const p of curPoops) {
@@ -607,7 +605,7 @@ export default function Tamagotchi({
         }
       }
 
-      // choose world animation
+      // Choose world animation
       const chosenAnim: AnimKey = (() => {
         if (deadRef.current) return "idle";
         if (sleepingNow) return def.sleep?.length ? "sleep" : "idle";
@@ -616,7 +614,7 @@ export default function Tamagotchi({
         return animRef.current;
       })();
 
-      // frames with smart fallback to walk
+      // Frames with smart fallback to walk if needed
       let framesAll = (def[chosenAnim] ?? def.idle ?? def.walk ?? []) as string[];
       framesAll = framesAll.filter(Boolean);
       if (!sleepingNow && framesAll.length < 2 && (def.walk?.length ?? 0) >= 2) framesAll = def.walk!;
@@ -626,12 +624,12 @@ export default function Tamagotchi({
       const rawW = base?.width ?? 32;
       const rawH = base?.height ?? 32;
 
-      // autoscale: scale egg by EGG_SCALE; scale non-egg by NON_EGG_SCALE relative to egg raw height
+      // Autoscale in world: egg by EGG_SCALE, non-egg by NON_EGG_SCALE relative to egg height
       const factor = (String(formRef.current) === "egg") ? EGG_SCALE : NON_EGG_SCALE;
       const scale = (eggRawH / Math.max(1, rawH)) * factor;
       const drawW = Math.round(rawW * scale), drawH = Math.round(rawH * scale);
 
-      // movement
+      // Movement
       if (!deadRef.current && !sleepingNow) {
         x += (dir * WALK_SPEED * dt) / 1000;
         const minX = 0, maxX = LOGICAL_W - drawW;
@@ -639,7 +637,7 @@ export default function Tamagotchi({
         else if (x > maxX) { x = maxX; dir = -1; }
       }
 
-      // frame switching
+      // Frame switching (single loop — prevents stacked/overlapping walk)
       frameTimer += dt;
       if (frameTimer > 1e6) frameTimer %= 1e6;
       let frameIndex = 0;
@@ -648,7 +646,7 @@ export default function Tamagotchi({
         frameIndex = step % frames.length;
       }
 
-      // draw pet or dead
+      // Draw pet or dead sprite
       if (deadRef.current) {
         const list = deadCandidates(formRef.current);
         const deadSrc = list.find((p) => images[p]);
@@ -662,7 +660,7 @@ export default function Tamagotchi({
         }
       } else if (frames.length) {
         ctx.save();
-        // face movement direction
+        // Face movement direction
         let flip = dir === -1;
         if (INVERT_WALK_FACING) flip = !flip;
         if (flip) {
@@ -675,19 +673,19 @@ export default function Tamagotchi({
         ctx.restore();
       }
 
-      // banners
+      // Banners
       const cat = catastropheRef.current;
       if (cat && now < cat.until) drawBanner(ctx, LOGICAL_W, `⚠ ${cat.cause}! stats draining fast`);
       if (!deadRef.current && sleepingNow) drawBanner(ctx, LOGICAL_W, "😴 Sleeping");
 
-      ctx.restore(); // end shifted layer
+      ctx.restore(); // end shifted world
     };
 
-    // kick off a single RAF loop for this instance
+    // Start a single RAF loop for this instance
     if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(loop);
 
-    // cleanup
+    // Cleanup
     return () => {
       if (ro) ro.disconnect();
       else window.removeEventListener("resize", resize);
@@ -698,7 +696,7 @@ export default function Tamagotchi({
     };
   }
 
-  /** Death overlay & controls */
+  /** Death overlay */
   const DeathOverlay = isDead ? (
     <OverlayCard>
       <div style={{ fontSize: 18, marginBottom: 6 }}>Your pet has died</div>
@@ -805,17 +803,27 @@ function prettyName(f: FormKey) {
     const base = String(f).replace("_child", "");
     const cap = base === "we" ? "WE" : (base.charAt(0).toUpperCase() + base.slice(1));
     return `${cap} (child)`;
-  }
+    }
   return f;
 }
+
+// Debug evolve follows real rules (egg -> random child; child -> mapped adult)
 function forceEvolve(f: FormKey): FormKey {
-  if (f === "egg") return "chog_child";
+  if (f === "egg") {
+    return pickOne(["chog_child", "molandak_child", "moyaki_child", "we_child"] as const) as FormKey;
+  }
   if (String(f).endsWith("_child")) {
-    const map: Record<string, FormKey> = { chog_child: "Chog", molandak_child: "Molandak", moyaki_child: "Moyaki", we_child: "WE" };
+    const map: Record<string, FormKey> = {
+      chog_child: "Chog",
+      molandak_child: "Molandak",
+      moyaki_child: "Moyaki",
+      we_child: "WE",
+    };
     return (map[String(f)] || f) as FormKey;
   }
   return f;
 }
+
 function deadCandidates(form: FormKey): string[] {
   return [
     `/sprites/${String(form)}/dead.png`,
@@ -856,7 +864,7 @@ function simulateOffline(args: {
   let sick = args.startSick;
   const newly: number[] = [];
 
-  // minute rates (aligned with online sim)
+  // Minute rates aligned with online sim
   const hungerPerMinNormal = 1 / 90;
   const healthPerMinNormal = 1 / (10 * 60);
   const happyPerMinNormal  = 1 / (12 * 60);
@@ -865,7 +873,7 @@ function simulateOffline(args: {
   const healthPerMinSick = 1 / 7;
   const happyPerMinSick  = 1 / 8;
 
-  const hungerPerMinFast = 1; // catastrophe drops hunger in ~1 minute
+  const hungerPerMinFast = 1; // catastrophe: hunger drops to zero in ~1 minute
 
   let ageAtMinuteStart = args.startAgeMs;
 
@@ -878,7 +886,7 @@ function simulateOffline(args: {
 
     ageAtMinuteStart += 60000;
 
-    // apply any scheduled catastrophe if this minute hits and it's not sleeping
+    // scheduled catastrophe if minute hits and not sleeping
     let catastropheActive = false;
     for (const t of schedule) {
       if (consumedSet.has(t)) continue;
@@ -903,7 +911,7 @@ function simulateOffline(args: {
         health:      s.health      - healthDrop,
       });
 
-      // illness roll (minute granularity)
+      // Illness roll (minute granularity)
       if (!sick) {
         const lowClean = 1 - s.cleanliness;
         const p = 0.02 + 0.3 * 0.3 + 0.2 * lowClean;
@@ -919,7 +927,7 @@ function simulateOffline(args: {
   return { stats: clampStats(s), sick, newConsumed: newly };
 }
 
-/** Tiny UI atoms */
+/** Small UI atoms */
 function Bar({ label, value, h = 6 }: { label: string; value: number; h?: number }) {
   const pct = Math.max(0, Math.min(1, value)) * 100;
   return (
