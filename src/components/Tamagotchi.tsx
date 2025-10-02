@@ -2,25 +2,30 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AnimSet, FormKey, catalog } from "../game/catalog";
 
-/** Canvas renderer with edge-bounce + avatar overlay + basic action buttons. */
+/** Centered canvas renderer with edge-bounce, avatar overlay, and compact UI. */
 export default function Tamagotchi({
   currentForm,
-  onEvolve, // kept for compatibility
+  onEvolve,
 }: {
   currentForm: FormKey;
   onEvolve?: () => FormKey | void;
 }) {
-  // ===== Scene logical size (kept crisp regardless of CSS size) =====
+  // ===== Scene logical size =====
   const LOGICAL_W = 320;
   const LOGICAL_H = 180;
   const FPS = 6;
   const WALK_SPEED = 42;
 
+  // Centering / layout width
+  const MAX_W = 720;              // px, max visual width for the scene block
+  const CANVAS_H = 360;           // px, container CSS height (kept)
+  const BAR_HEIGHT = 6;           // px, compact bars
+
   // Per-form visual tweaks
   const SCALE_MAP: Partial<Record<FormKey, number>> = { egg: 0.66 };
-  const BASELINE_NUDGE: Partial<Record<FormKey, number>> = { egg: +25 };
+  const BASELINE_NUDGE: Partial<Record<FormKey, number>> = { egg: +27 };
 
-  // ===== Local pet stats (wire to your GameProvider later) =====
+  // Local pet stats (placeholder)
   const [stats, setStats] = useState({
     energy: 0.62,
     hygiene: 0.85,
@@ -30,13 +35,13 @@ export default function Tamagotchi({
     poop: 0,
   });
 
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Local anim (you can drive from outside later)
   const [anim, setAnim] = useState<keyof AnimSet>("walk");
 
-  // ===== Preload list: background + frames of current form =====
+  // Preload list
   const urls = useMemo(() => {
     const set = new Set<string>();
     set.add("/bg/BG.png");
@@ -45,27 +50,29 @@ export default function Tamagotchi({
     return Array.from(set);
   }, [currentForm]);
 
-  // For avatar: prefer first idle frame, fallback to walk[0]
+  // Avatar src
   const avatarSrc = useMemo(() => {
     const def = catalog[currentForm];
     return def.idle[0] ?? def.walk[0] ?? "";
   }, [currentForm]);
 
-  // Passive stat drift (very light)
+  // Passive drift
   useEffect(() => {
     const id = setInterval(() => {
-      setStats((s) => clampStats({
-        ...s,
-        energy: s.energy - 0.002,
-        hygiene: s.hygiene - 0.0015,
-        cleanliness: Math.max(0, s.cleanliness - (s.poop > 0 ? 0.003 : 0.0005)),
-        mood: s.mood - 0.001,
-      }));
+      setStats((s) =>
+        clampStats({
+          ...s,
+          energy: s.energy - 0.002,
+          hygiene: s.hygiene - 0.0015,
+          cleanliness: Math.max(0, s.cleanliness - (s.poop > 0 ? 0.003 : 0.0005)),
+          mood: s.mood - 0.001,
+        })
+      );
     }, 1000);
     return () => clearInterval(id);
   }, []);
 
-  // ===== Sprite loop =====
+  // Sprite loop
   useEffect(() => {
     let alive = true;
     const loaders = urls.map(
@@ -105,7 +112,7 @@ export default function Tamagotchi({
     const def = catalog[currentForm];
     const framesAll = (def[anim]?.length ? def[anim] : def.idle).filter((u) => !!images[u]);
 
-    // Sprite size with per-form scale
+    // Sprite size
     const sample = framesAll.length ? images[framesAll[0]] : undefined;
     const baseW = sample?.width ?? 32;
     const baseH = sample?.height ?? 32;
@@ -125,18 +132,20 @@ export default function Tamagotchi({
     let frameTimer = 0;
     let frameIndex = 0;
 
-    // DPR-aware resize with preserved aspect
+    // DPR-aware resize (preserve aspect, center within fixed-width container)
     const resize = () => {
       const wrap = wrapRef.current!;
       const dpr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
-      const w = wrap.clientWidth || LOGICAL_W;
-      const h = wrap.clientHeight || LOGICAL_H;
+
+      // Width: clamp to container width; container is centered and max-width limited
+      const containerW = wrap.clientWidth || LOGICAL_W;
+      const containerH = CANVAS_H;
 
       const target = LOGICAL_W / LOGICAL_H;
-      const box = w / h;
-      let cssW = w, cssH = h;
-      if (box > target) cssW = Math.round(h * target);
-      else cssH = Math.round(w / target);
+      const box = containerW / containerH;
+      let cssW = containerW, cssH = containerH;
+      if (box > target) cssW = Math.round(containerH * target);
+      else cssH = Math.round(containerW / target);
 
       canvas.style.width = cssW + "px";
       canvas.style.height = cssH + "px";
@@ -187,7 +196,7 @@ export default function Tamagotchi({
       if (x < minX) { x = minX; dir = 1; }
       else if (x > maxX) { x = maxX; dir = -1; }
 
-      // Draw current frame (flip when dir = -1)
+      // Draw sprite (flip when facing left)
       const src = framesAll.length ? framesAll[frameIndex] : undefined;
       const img = src ? images[src] : undefined;
       if (img) {
@@ -214,75 +223,43 @@ export default function Tamagotchi({
     };
   };
 
-  // ===== Actions (simple local effects; replace with your game logic later) =====
+  // Actions (placeholder)
   const act = {
     feed: () =>
       setStats((s) =>
-        clampStats({
-          ...s,
-          energy: s.energy + 0.25,
-          mood: s.mood + 0.06,
-          hygiene: s.hygiene - 0.04,
-          poop: s.poop + 1,
-        })
+        clampStats({ ...s, energy: s.energy + 0.25, mood: s.mood + 0.06, hygiene: s.hygiene - 0.04, poop: s.poop + 1 })
       ),
     play: () =>
       setStats((s) =>
-        clampStats({
-          ...s,
-          mood: s.mood + 0.18,
-          energy: s.energy - 0.12,
-          cleanliness: s.cleanliness - 0.03,
-        })
+        clampStats({ ...s, mood: s.mood + 0.18, energy: s.energy - 0.12, cleanliness: s.cleanliness - 0.03 })
       ),
-    heal: () =>
-      setStats((s) =>
-        clampStats({
-          ...s,
-          health: s.health + 0.3,
-          mood: s.mood + 0.04,
-        })
-      ),
-    clean: () =>
-      setStats((s) =>
-        clampStats({
-          ...s,
-          poop: Math.max(0, s.poop - 1),
-          cleanliness: s.cleanliness + 0.22,
-          hygiene: s.hygiene + 0.08,
-        })
-      ),
-    wash: () =>
-      setStats((s) =>
-        clampStats({
-          ...s,
-          hygiene: s.hygiene + 0.25,
-          mood: s.mood - 0.02,
-        })
-      ),
-    sleep: () =>
-      setStats((s) =>
-        clampStats({
-          ...s,
-          energy: s.energy + 0.35,
-          mood: s.mood + 0.02,
-        })
-      ),
+    heal: () => setStats((s) => clampStats({ ...s, health: s.health + 0.3, mood: s.mood + 0.04 })),
+    clean: () => setStats((s) => clampStats({ ...s, poop: Math.max(0, s.poop - 1), cleanliness: s.cleanliness + 0.22, hygiene: s.hygiene + 0.08 })),
+    wash: () => setStats((s) => clampStats({ ...s, hygiene: s.hygiene + 0.25, mood: s.mood - 0.02 })),
+    sleep: () => setStats((s) => clampStats({ ...s, energy: s.energy + 0.35, mood: s.mood + 0.02 })),
   };
 
   return (
-    <div>
-      {/* Canvas wrapper */}
+    <div
+      ref={containerRef}
+      style={{
+        width: "min(92vw, 100%)",
+        maxWidth: MAX_W,
+        margin: "0 auto",                  // center whole block
+      }}
+    >
+      {/* Canvas wrapper (relative for avatar) */}
       <div
         ref={wrapRef}
         style={{
           width: "100%",
-          height: 360,
+          height: CANVAS_H,
           position: "relative",
           imageRendering: "pixelated",
           overflow: "hidden",
           background: "transparent",
           borderRadius: 12,
+          margin: "0 auto",
         }}
       >
         <canvas
@@ -292,10 +269,11 @@ export default function Tamagotchi({
             imageRendering: "pixelated",
             background: "transparent",
             borderRadius: 12,
+            margin: "0 auto",
           }}
         />
 
-        {/* Top-right avatar overlay */}
+        {/* Avatar stays anchored to this wrapper's top-right */}
         {avatarSrc && (
           <div
             style={{
@@ -316,26 +294,29 @@ export default function Tamagotchi({
               src={avatarSrc}
               alt="pet"
               draggable={false}
-              style={{
-                width: 40,
-                height: 40,
-                imageRendering: "pixelated",
-                display: "block",
-              }}
+              style={{ width: 40, height: 40, imageRendering: "pixelated", display: "block" }}
             />
           </div>
         )}
       </div>
 
-      {/* Bars */}
-      <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
-        <Bar label="Hygiene" value={stats.hygiene} />
-        <Bar label="Energy" value={stats.energy} />
-        <Bar label="Cleanliness" value={stats.cleanliness} />
+      {/* Compact bars (width matches scene, centered) */}
+      <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
+        <Bar label="Hygiene" value={stats.hygiene} h={BAR_HEIGHT} />
+        <Bar label="Energy" value={stats.energy} h={BAR_HEIGHT} />
+        <Bar label="Cleanliness" value={stats.cleanliness} h={BAR_HEIGHT} />
       </div>
 
-      {/* Actions */}
-      <div style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 8 }}>
+      {/* Actions row centered and wrapped to scene width */}
+      <div
+        style={{
+          marginTop: 10,
+          display: "flex",
+          flexWrap: "wrap",
+          gap: 8,
+          justifyContent: "center",
+        }}
+      >
         <button className="btn" onClick={act.feed}>🍗 Feed</button>
         <button className="btn" onClick={act.play}>🎮 Play</button>
         <button className="btn" onClick={act.heal}>💊 Heal</button>
@@ -358,17 +339,17 @@ export default function Tamagotchi({
   );
 }
 
-/** Simple inline progress bar */
-function Bar({ label, value }: { label: string; value: number }) {
+/** Compact progress bar */
+function Bar({ label, value, h = 6 }: { label: string; value: number; h?: number }) {
   const pct = Math.max(0, Math.min(1, value)) * 100;
   return (
     <div>
       <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 4 }}>{label}</div>
       <div
         style={{
-          height: 10,
+          height: h,
           width: "100%",
-          borderRadius: 8,
+          borderRadius: Math.max(6, h),
           background: "rgba(255,255,255,0.08)",
           overflow: "hidden",
         }}
