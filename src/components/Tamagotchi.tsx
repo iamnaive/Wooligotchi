@@ -1,16 +1,18 @@
 // src/components/Tamagotchi.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { catalog, type FormKey, type AnimSet as AnyAnimSet } from "../game/catalog";
+
+/** --- module-level constants (видны хелперам) --- */
 const DEAD_FALLBACK = "/sprites/dead.png";
 
 /**
- * Wooligotchi (full build)
- * - Evolution: egg -> (1 min total age) -> one of *_child -> (2 days total age) -> Adult (Chog/Molandak/Moyaki/WE)
- * - Offline catch-up minute-by-minute (respects sleep), with anti local-time rewind
- * - Illness & catastrophes simulated offline and online (first 3 catastrophes guaranteed overall; then 90%/min)
- * - Sick avatars (uses `sick` frames when available)
- * - Death with per-form sprite and global fallback
- * - Autoscale: render height matches egg frame height so adults aren’t oversized
+ * Wooligotchi (stable)
+ * - Evolution: egg -> (1m) *_child -> (2d) Adult (Chog/Molandak/Moyaki/WE)
+ * - Works even if parent doesn't update form (internal state fallback)
+ * - Offline catch-up (stats + illness + catastrophes), anti local-time rewind
+ * - Sick avatars (uses `sick`)
+ * - Dead sprite per form (+fallback)
+ * - Autoscale to egg height
  */
 
 export default function Tamagotchi({
@@ -24,11 +26,11 @@ export default function Tamagotchi({
   onLoseLife?: () => void;
   onEvolve?: (next?: FormKey) => FormKey | void;
 }) {
-  /** ===== Canvas & world ===== */
+  /** ===== World ===== */
   const LOGICAL_W = 320;
   const LOGICAL_H = 180;
   const FPS = 6;
-  const WALK_SPEED = 42; // px/sec (logical)
+  const WALK_SPEED = 42;
   const MAX_W = 720;
   const CANVAS_H = 360;
   const BAR_H = 6;
@@ -41,7 +43,7 @@ export default function Tamagotchi({
   const EVOLVE_ADULT_AT = 2 * 24 * 3600_000;  // 2 days
 
   /** ===== Forms ===== */
-  const CHILD_CHOICES: FormKey[] = ["chog_child", "molandak_child", "moyaki_child", "we_child"] as FormKey[];
+  const CHILD_CHOICES: FormKey[] = ["chog_child", "molandak_child", "moyaki_child", "we_child"];
   const ADULT_MAP: Record<string, FormKey> = {
     chog_child: "Chog",
     molandak_child: "Molandak",
@@ -52,16 +54,39 @@ export default function Tamagotchi({
   /** ===== Assets ===== */
   const BG_SRC = "/bg/BG.png";
   const POOP_SRCS = ["/sprites/poop/poop1.png", "/sprites/poop/poop2.png", "/sprites/poop/poop3.png"];
-  
+
   /** ===== Storage keys ===== */
-  const LAST_SEEN_KEY = "wg_last_seen_v3";       // last wall time seen
-  const AGE_MS_KEY = "wg_age_ms_v4";             // total age (ms)
-  const AGE_MAX_WALL_KEY = "wg_age_max_wall_v2"; // monotonic guard vs clock rewind
+  const LAST_SEEN_KEY = "wg_last_seen_v3";
+  const AGE_MS_KEY = "wg_age_ms_v4";
+  const AGE_MAX_WALL_KEY = "wg_age_max_wall_v2";
   const POOPS_KEY = "wg_poops_v1";
   const SLEEP_LOCK_KEY = "wg_sleep_lock_v1";
   const SLEEP_FROM_KEY = "wg_sleep_from_v1";
-  const SLEEP_TO_KEY   = "wg_sleep_to_v1";
-  const CATA_COUNT_KEY = "wg_cata_count_v4";     // catastrophe triggers total
+  const SLEEP_TO_KEY = "wg_sleep_to_v1";
+  const CATA_COUNT_KEY = "wg_cata_count_v4";
+
+  /** ===== Internal form state (фикс эволюции) ===== */
+  // Нормализуем вход (если вдруг прилетит старое имя — сразу переводим в новое)
+  const normalizeForm = (f: string): FormKey => {
+    const map: Record<string, FormKey> = {
+      char1: "chog_child",
+      char1_adult: "Chog",
+      char2: "molandak_child",
+      char2_adult: "Molandak",
+      char3: "moyaki_child",
+      char3_adult: "Moyaki",
+      char4: "we_child",
+      char4_adult: "WE",
+    };
+    const nf = (map[f] || f) as FormKey;
+    return (catalog[nf] ? nf : "egg") as FormKey;
+  };
+
+  const [form, setForm] = useState<FormKey>(() => normalizeForm(currentForm));
+  // Если родитель всё-таки меняет проп — синхронизируемся
+  useEffect(() => {
+    setForm(normalizeForm(currentForm));
+  }, [currentForm]);
 
   /** ===== State ===== */
   const [anim, setAnim] = useState<AnimKey>("walk");
@@ -72,7 +97,7 @@ export default function Tamagotchi({
   const [deathReason, setDeathReason] = useState<string | null>(null);
   const [lastHealAt, setLastHealAt] = useState<number>(0);
 
-  // Sleep window (auto by default; can be locked once)
+  // Sleep window
   const [useAutoTime, setUseAutoTime] = useState<boolean>(() => !localStorage.getItem(SLEEP_LOCK_KEY));
   const [sleepStart, setSleepStart] = useState<string>(() => localStorage.getItem(SLEEP_FROM_KEY) || "22:00");
   const [wakeTime, setWakeTime] = useState<string>(() => localStorage.getItem(SLEEP_TO_KEY) || "08:30");
@@ -84,7 +109,7 @@ export default function Tamagotchi({
     return Number.isFinite(v) && v >= 0 ? v : 0;
   });
 
-  // Visual catastrophe window (fast-drain minute)
+  // Visual catastrophe window
   const [catastrophe, setCatastrophe] = useState<Catastrophe | null>(null);
 
   /** ===== Stable refs ===== */
@@ -95,6 +120,7 @@ export default function Tamagotchi({
   const poopsRef = useLatest(poops);
   const catastropheRef = useLatest(catastrophe);
   const ageRef = useLatest(ageMs);
+  const formRef = useLatest(form);
   const sleepParamsRef = useRef({ useAutoTime, sleepStart, wakeTime, sleepLocked });
   useEffect(() => { sleepParamsRef.current = { useAutoTime, sleepStart, wakeTime, sleepLocked }; }, [useAutoTime, sleepStart, wakeTime, sleepLocked]);
 
@@ -104,41 +130,43 @@ export default function Tamagotchi({
 
   /** ===== Catalog / frames ===== */
   const safeForm = (f: FormKey) => (catalog[f] ? f : ("egg" as FormKey));
-  const def = useMemo(() => (catalog[safeForm(currentForm)] || {}) as AnyAnimSet, [currentForm]);
+  const def = useMemo(() => (catalog[safeForm(form)] || {}) as AnyAnimSet, [form]);
 
   // Preload
   const urls = useMemo(() => {
     const set = new Set<string>();
     set.add(BG_SRC);
-    (["idle","walk","sick","sad","unhappy","sleep"] as AnimKey[]).forEach(k => (def[k] ?? []).forEach(u => set.add(u)));
-    POOP_SRCS.forEach(u => set.add(u));
-    // death candidates
-    deadCandidates(currentForm).forEach(u => set.add(u));
+    (["idle", "walk", "sick", "sad", "unhappy", "sleep"] as AnimKey[]).forEach((k) =>
+      (def[k] ?? []).forEach((u) => set.add(u))
+    );
+    POOP_SRCS.forEach((u) => set.add(u));
+    deadCandidates(form).forEach((u) => set.add(u));
     // egg frames for autoscale
     const egg = catalog["egg"] || {};
-    (egg.idle ?? egg.walk ?? []).forEach(u => set.add(u));
+    (egg.idle ?? egg.walk ?? []).forEach((u) => set.add(u));
     return Array.from(set);
-  }, [def, currentForm]);
+  }, [def, form]);
 
   /** ===== Sleep calc ===== */
   function isSleepingAt(ts: number) {
     const { useAutoTime, sleepLocked, sleepStart, wakeTime } = sleepParamsRef.current;
     const d = new Date(ts);
-    const H = d.getHours(), M = d.getMinutes();
+    const H = d.getHours(),
+      M = d.getMinutes();
     if (useAutoTime || sleepLocked === false) {
       const after = H > 22 || (H === 22 && M >= 0);
       const before = H < 8 || (H === 8 && M < 30);
       return after || before;
     }
-    const [ssH, ssM] = (sleepStart || "22:00").split(":").map(n => +n || 0);
-    const [wkH, wkM] = (wakeTime || "08:30").split(":").map(n => +n || 0);
+    const [ssH, ssM] = (sleepStart || "22:00").split(":").map((n) => +n || 0);
+    const [wkH, wkM] = (wakeTime || "08:30").split(":").map((n) => +n || 0);
     const afterStart = H > ssH || (H === ssH && M >= ssM);
     const beforeWake = H < wkH || (H === wkH && M < wkM);
-    if (ssH > wkH || (ssH === wkH && ssM > wkM)) return afterStart || beforeWake; // crosses midnight
+    if (ssH > wkH || (ssH === wkH && ssM > wkM)) return afterStart || beforeWake;
     return afterStart && beforeWake;
   }
 
-  /** ===== Offline catch-up (stats + illness + catastrophes) + age; anti-rewind ===== */
+  /** ===== Offline catch-up (stats+illness+catastrophes) + age; anti-rewind ===== */
   useEffect(() => {
     try {
       const nowWall = Date.now();
@@ -163,7 +191,7 @@ export default function Tamagotchi({
         setStats(() => clampStats(res.stats));
         setIsSick(res.sick);
         if (res.cataIncrements > 0) localStorage.setItem(CATA_COUNT_KEY, String(cata0 + res.cataIncrements));
-        setAgeMs(v => v + elapsed);
+        setAgeMs((v) => v + elapsed);
       }
 
       localStorage.setItem(LAST_SEEN_KEY, String(nowWall));
@@ -172,7 +200,7 @@ export default function Tamagotchi({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** ===== Online age ticker (perf-based; blocks time rewind cheats while open) ===== */
+  /** ===== Online age ticker (perf-based) ===== */
   useEffect(() => {
     let lastPerf = performance.now();
     const id = window.setInterval(() => {
@@ -181,12 +209,12 @@ export default function Tamagotchi({
       if (!Number.isFinite(dt) || dt < 0) dt = 0;
       dt = Math.min(dt, 1000);
       lastPerf = nowPerf;
-      setAgeMs(v => v + dt);
+      setAgeMs((v) => v + dt);
     }, 1000 / 6);
     return () => clearInterval(id);
   }, []);
 
-  /** ===== Persist last seen & age often ===== */
+  /** ===== Persist often ===== */
   useEffect(() => {
     const save = () => {
       try {
@@ -206,27 +234,34 @@ export default function Tamagotchi({
       window.removeEventListener("visibilitychange", save);
       window.removeEventListener("pagehide", save);
       window.removeEventListener("beforeunload", save);
-      try { localStorage.setItem(AGE_MS_KEY, String(ageRef.current)); } catch {}
+      try {
+        localStorage.setItem(AGE_MS_KEY, String(ageRef.current));
+      } catch {}
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** ===== Evolution thresholds ===== */
+  /** ===== Evolution (всегда работаем, даже без родителя) ===== */
   useEffect(() => {
-    if (!onEvolve) return;
-    if (isEgg(currentForm) && ageMs >= EVOLVE_CHILD_AT) {
+    // egg -> child
+    if (formRef.current === "egg" && ageRef.current >= EVOLVE_CHILD_AT) {
       const next = pickOne(CHILD_CHOICES);
-      onEvolve(next);
+      onEvolve?.(next);
+      setForm(next);
       return;
     }
-    if (isChild(currentForm) && ageMs >= EVOLVE_ADULT_AT) {
-      const adult = ADULT_MAP[String(currentForm)];
-      if (adult) onEvolve(adult);
+    // child -> adult
+    if (String(formRef.current).endsWith("_child") && ageRef.current >= EVOLVE_ADULT_AT) {
+      const adult = ADULT_MAP[String(formRef.current)];
+      if (adult) {
+        onEvolve?.(adult);
+        setForm(adult);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ageMs, currentForm]);
+  }, [ageMs, form]);
 
-  /** ===== Periodic drains / illness / poop / catastrophe banners ===== */
+  /** ===== Periodic drains / illness / poop / catastrophes ===== */
   useEffect(() => {
     let lastWall = Date.now();
     let lastMinuteGate = -1;
@@ -242,22 +277,26 @@ export default function Tamagotchi({
         const fast = catastropheRef.current && now < (catastropheRef.current?.until ?? 0);
         const hungerPerMs = fast ? 1 / 60000 : 1 / (90 * 60 * 1000);
         const healthPerMs = sickRef.current ? 1 / (7 * 60 * 1000) : 1 / (10 * 60 * 60 * 1000);
-        const happyPerMs  = sickRef.current ? 1 / (8 * 60 * 1000) : 1 / (12 * 60 * 60 * 1000);
-        const dirtPerMs   = (poopsRef.current.length > 0 ? 1 / (5 * 60 * 60 * 1000) : 1 / (12 * 60 * 60 * 1000));
+        const happyPerMs = sickRef.current ? 1 / (8 * 60 * 1000) : 1 / (12 * 60 * 60 * 1000);
+        const dirtPerMs = poopsRef.current.length > 0 ? 1 / (5 * 60 * 60 * 1000) : 1 / (12 * 60 * 60 * 1000);
 
         setStats((s) => {
           const next = clampStats({
             cleanliness: s.cleanliness - dirtPerMs * dt,
-            hunger:      s.hunger      - hungerPerMs * dt,
-            happiness:   s.happiness   - happyPerMs  * dt,
-            health:      s.health      - healthPerMs * dt,
+            hunger: s.hunger - hungerPerMs * dt,
+            happiness: s.happiness - happyPerMs * dt,
+            health: s.health - healthPerMs * dt,
           });
           if ((next.hunger <= 0 || next.health <= 0) && !deadRef.current) {
             setIsDead(true);
             setDeathReason(
-              next.hunger <= 0 ? "starvation"
-              : catastropheRef.current && now < (catastropheRef.current?.until ?? 0) ? `fatal ${catastropheRef.current?.cause}`
-              : sickRef.current ? "illness" : "collapse"
+              next.hunger <= 0
+                ? "starvation"
+                : catastropheRef.current && now < (catastropheRef.current?.until ?? 0)
+                ? `fatal ${catastropheRef.current?.cause}`
+                : sickRef.current
+                ? "illness"
+                : "collapse"
             );
           }
           return next;
@@ -273,7 +312,7 @@ export default function Tamagotchi({
         if (sickRef.current && Math.random() < 0.015) setIsSick(false);
       }
 
-      // Catastrophes: after age >= 2d, roll once per minute; first 3 guaranteed
+      // Catastrophes: after 2d, once/min; first 3 guaranteed; then 90%/min
       const gateMinute = Math.floor(now / 60000);
       if (ageRef.current >= EVOLVE_ADULT_AT && gateMinute !== lastMinuteGate) {
         lastMinuteGate = gateMinute;
@@ -302,7 +341,9 @@ export default function Tamagotchi({
     } catch {}
   }, []);
   useEffect(() => {
-    try { localStorage.setItem(POOPS_KEY, JSON.stringify(poops.slice(-12))); } catch {}
+    try {
+      localStorage.setItem(POOPS_KEY, JSON.stringify(poops.slice(-12)));
+    } catch {}
   }, [poops]);
 
   /** ===== Actions ===== */
@@ -358,7 +399,7 @@ export default function Tamagotchi({
     });
   }
 
-  /** ===== Render loop (autoscale + sick avatar + dead sprite selection) ===== */
+  /** ===== Render loop ===== */
   useEffect(() => {
     let alive = true;
     const urlsFull = Array.from(new Set([...urls, BG_SRC]));
@@ -373,7 +414,7 @@ export default function Tamagotchi({
       cancelAnimationFrame((window as any).__wg_raf || 0);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [urls.join("|"), currentForm]);
+  }, [urls.join("|"), form]);
 
   function startLoop(images: Record<string, HTMLImageElement>) {
     const canvas = canvasRef.current;
@@ -391,7 +432,8 @@ export default function Tamagotchi({
       const containerH = CANVAS_H;
       const target = LOGICAL_W / LOGICAL_H;
       const box = containerW / containerH;
-      let cssW = containerW, cssH = containerH;
+      let cssW = containerW,
+        cssH = containerH;
       if (box > target) cssW = Math.round(containerH * target);
       else cssH = Math.round(containerW / target);
       canvas.style.width = cssW + "px";
@@ -419,12 +461,12 @@ export default function Tamagotchi({
     let last = performance.now();
     let frameTimer = 0;
 
-    // Determine target world height from egg’s first usable frame
+    // Autoscale target = egg frame height
     function getTargetHeight(): number {
       const eggSet = (catalog as any)["egg"] as AnyAnimSet;
       const eggSrc = (eggSet?.idle?.[0] ?? eggSet?.walk?.[0]) as string | undefined;
       const eggImg = eggSrc ? images[eggSrc] : undefined;
-      return eggImg ? eggImg.height : 32; // safe default
+      return eggImg ? eggImg.height : 32;
     }
     const targetH = getTargetHeight();
 
@@ -448,7 +490,7 @@ export default function Tamagotchi({
         ctx.drawImage(bg, dx, dy, dw, dh);
       }
 
-      // Avatar (top-right) — uses sick frame if sick & available
+      // Avatar (top-right)
       const now = Date.now();
       const sleepingNow = isSleepingAt(now);
       const avatarAnimKey: AnimKey = (() => {
@@ -462,14 +504,15 @@ export default function Tamagotchi({
       const avatarSrc = avatarFrames[0];
       if (avatarSrc && images[avatarSrc]) {
         const av = images[avatarSrc];
-        const aw = 40, ah = 40;
-        const padX = 10, padY = 4;
+        const aw = 40,
+          ah = 40;
+        const padX = 10,
+          padY = 4;
         const ax = LOGICAL_W - padX - aw;
         const ay = padY;
         (ctx as any).imageSmoothingEnabled = false;
         ctx.drawImage(av, ax, ay, aw, ah);
 
-        // ❤️ HP%
         const hp = Math.round((statsRef.current.health ?? 0) * 100);
         const label = `❤️ ${hp}%`;
         ctx.font = "10px monospace";
@@ -484,7 +527,7 @@ export default function Tamagotchi({
         ctx.fillText(label, tx, ty);
       }
 
-      // Everything else shifted down
+      // Shifted world
       ctx.save();
       ctx.translate(0, Y_SHIFT);
 
@@ -496,31 +539,30 @@ export default function Tamagotchi({
           const px = Math.round(p.x);
           const py = Math.round(LOGICAL_H - BASE_GROUND - 6);
           if (img) ctx.drawImage(img, px, py - 12, 12, 12);
-          else { ctx.font = "10px monospace"; ctx.fillText("💩", px, py); }
+          else {
+            ctx.font = "10px monospace";
+            ctx.fillText("💩", px, py);
+          }
         }
       }
 
-      // Choose animation for world sprite
+      // Choose world animation
       const chosenAnim: AnimKey = (() => {
         if (deadRef.current) return "idle";
         if (sleepingNow) return def.sleep?.length ? "sleep" : "idle";
         if (sickRef.current) return def.sick?.length ? "sick" : "idle";
-        if (statsRef.current.happiness < 0.35)
-          return (def.sad?.length ? "sad" : def.unhappy?.length ? "unhappy" : "walk") as AnimKey;
+        if (statsRef.current.happiness < 0.35) return (def.sad?.length ? "sad" : def.unhappy?.length ? "unhappy" : "walk") as AnimKey;
         return animRef.current;
       })();
 
-      // Smart animation fallback to walk if needed
       let framesAll = (def[chosenAnim] ?? def.idle ?? def.walk ?? []) as string[];
       framesAll = framesAll.filter(Boolean);
-      if (!sleepingNow && framesAll.length < 2 && (def.walk?.length ?? 0) >= 2) {
-        framesAll = def.walk!;
-      }
+      if (!sleepingNow && framesAll.length < 2 && (def.walk?.length ?? 0) >= 2) framesAll = def.walk!;
       const frames = framesAll.filter((u) => !!images[u]);
 
       const base = frames.length ? images[frames[0]] : undefined;
-      const rawW = (base?.width ?? 32);
-      const rawH = (base?.height ?? 32);
+      const rawW = base?.width ?? 32;
+      const rawH = base?.height ?? 32;
 
       // AUTOSCALE to egg height
       const scale = targetH / Math.max(1, rawH);
@@ -532,8 +574,13 @@ export default function Tamagotchi({
         x += (dir * WALK_SPEED * dt) / 1000;
         const minX = 0;
         const maxX = LOGICAL_W - drawW;
-        if (x < minX) { x = minX; dir = 1; }
-        else if (x > maxX) { x = maxX; dir = -1; }
+        if (x < minX) {
+          x = minX;
+          dir = 1;
+        } else if (x > maxX) {
+          x = maxX;
+          dir = -1;
+        }
       }
 
       // Frame switching
@@ -545,16 +592,16 @@ export default function Tamagotchi({
         frameIndex = step % frames.length;
       }
 
-      // Draw pet or dead sprite
+      // Draw pet or dead
       if (deadRef.current) {
-        const list = deadCandidates(currentForm);
+        const list = deadCandidates(formRef.current);
         const deadSrc = list.find((p) => images[p]);
         const deadImg = deadSrc ? images[deadSrc] : null;
         if (deadImg) {
           const w = Math.round(deadImg.width * scale);
           const h = Math.round(deadImg.height * scale);
           const ix = Math.round((LOGICAL_W - w) / 2);
-          const iy = Math.round(BASELINE - h);
+          const iy = Math.round(LOGICAL_H - BASE_GROUND - h);
           ctx.drawImage(deadImg, ix, iy, w, h);
         }
       } else if (frames.length) {
@@ -577,12 +624,11 @@ export default function Tamagotchi({
       if (cat && now < cat.until) drawBanner(ctx, LOGICAL_W, `⚠ ${cat.cause}! stats draining fast`);
       if (!deadRef.current && sleepingNow) drawBanner(ctx, LOGICAL_W, "😴 Sleeping");
 
-      ctx.restore(); // end Y_SHIFT
+      ctx.restore();
     };
 
     (window as any).__wg_raf = requestAnimationFrame(loop);
 
-    // Cleanup
     return () => {
       if (ro) ro.disconnect();
       else window.removeEventListener("resize", resize);
@@ -595,9 +641,13 @@ export default function Tamagotchi({
     <OverlayCard>
       <div style={{ fontSize: 18, marginBottom: 6 }}>Your pet has died</div>
       {deathReason && <div className="muted" style={{ marginBottom: 6 }}>Cause: {deathReason}</div>}
-      <div className="muted" style={{ marginBottom: 12 }}>Lives left: <b>{lives}</b></div>
+      <div className="muted" style={{ marginBottom: 12 }}>
+        Lives left: <b>{lives}</b>
+      </div>
       {lives > 0 ? (
-        <button className="btn btn-primary" onClick={spendLifeToRevive}>Spend 1 life to revive</button>
+        <button className="btn btn-primary" onClick={spendLifeToRevive}>
+          Spend 1 life to revive
+        </button>
       ) : (
         <div className="muted">Transfer 1 NFT to get a life.</div>
       )}
@@ -643,18 +693,27 @@ export default function Tamagotchi({
           pointerEvents: isDead ? ("none" as const) : ("auto" as const),
         }}
       >
-        <button className="btn" onClick={act.feed}>🍗 Feed</button>
-        <button className="btn" onClick={act.play}>🎮 Play</button>
-        <button className="btn" onClick={act.heal} disabled={!canHeal}>💊 Heal{!canHeal ? " (cooldown)" : ""}</button>
-        <button className="btn" onClick={act.clean}>🧻 Clean</button>
-        <button className="btn" onClick={() => setAnim((a) => (a === "walk" ? "idle" : "walk"))}>Toggle Walk/Idle</button>
-        {!!onEvolve && (
-          <button className="btn btn-primary" onClick={() => onEvolve()}>
-            ⭐ Evolve (debug)
-          </button>
-        )}
+        <button className="btn" onClick={act.feed}>
+          🍗 Feed
+        </button>
+        <button className="btn" onClick={act.play}>
+          🎮 Play
+        </button>
+        <button className="btn" onClick={act.heal} disabled={!canHeal}>
+          💊 Heal{!canHeal ? " (cooldown)" : ""}
+        </button>
+        <button className="btn" onClick={act.clean}>
+          🧻 Clean
+        </button>
+        <button className="btn" onClick={() => setAnim((a) => (a === "walk" ? "idle" : "walk"))}>
+          Toggle Walk/Idle
+        </button>
+        <button className="btn btn-primary" onClick={() => setForm(forceEvolve(form))}>
+          ⭐ Evolve (debug)
+        </button>
         <span className="muted" style={{ alignSelf: "center" }}>
-          Poop: {poops.length} | Form: {prettyName(String(currentForm))} {isSick ? " | 🤒 Sick" : ""} {catastrophe && Date.now() < catastrophe.until ? " | ⚠ Event" : ""} | Age: {(ageMs/1000|0)}s
+          Poop: {poops.length} | Form: {prettyName(form)} {isSick ? " | 🤒 Sick" : ""}{" "}
+          {catastrophe && Date.now() < catastrophe.until ? " | ⚠ Event" : ""} | Age: {(ageMs / 1000) | 0}s
         </span>
       </div>
 
@@ -709,15 +768,47 @@ type Poop = { x: number; src: string };
 type Catastrophe = { cause: string; until: number };
 const CATASTROPHE_CAUSES = ["food poisoning", "mysterious flu", "meteor dust", "bad RNG", "doom day syndrome"] as const;
 
-function isEgg(f: FormKey) { return f === "egg"; }
-function isChild(f: FormKey) { return String(f).endsWith("_child"); }
+function prettyName(f: FormKey) {
+  if (String(f).endsWith("_child")) {
+    const base = String(f).replace("_child", "");
+    const cap = base === "we" ? "WE" : (base.charAt(0).toUpperCase() + base.slice(1));
+    return `${cap} (child)`;
+  }
+  return f;
+}
+
+function forceEvolve(f: FormKey): FormKey {
+  if (f === "egg") return "chog_child";
+  if (String(f).endsWith("_child")) {
+    const map: Record<string, FormKey> = {
+      chog_child: "Chog",
+      molandak_child: "Molandak",
+      moyaki_child: "Moyaki",
+      we_child: "WE",
+    };
+    return (map[String(f)] || f) as FormKey;
+  }
+  return f;
+}
+
+function deadCandidates(form: FormKey): string[] {
+  return [
+    `/sprites/${String(form)}/dead.png`,
+    `/sprites/dead/${String(form)}.png`,
+    DEAD_FALLBACK,
+  ];
+}
 
 function useLatest<T>(v: T) {
   const r = useRef(v);
-  useEffect(() => { r.current = v; }, [v]);
+  useEffect(() => {
+    r.current = v;
+  }, [v]);
   return r;
 }
-function clamp01(x: number) { return Math.max(0, Math.min(1, x)); }
+function clamp01(x: number) {
+  return Math.max(0, Math.min(1, x));
+}
 function clampStats(s: Stats): Stats {
   return {
     cleanliness: clamp01(s.cleanliness),
@@ -726,8 +817,9 @@ function clampStats(s: Stats): Stats {
     health: clamp01(s.health),
   };
 }
-function pickOne<T>(arr: readonly T[]): T { return arr[Math.floor(Math.random() * arr.length)]!; }
-
+function pickOne<T>(arr: readonly T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)]!;
+}
 function drawBanner(ctx: CanvasRenderingContext2D, width: number, text: string) {
   const pad = 4;
   ctx.save();
@@ -743,9 +835,8 @@ function drawBanner(ctx: CanvasRenderingContext2D, width: number, text: string) 
 }
 function clampDt(ms: number): number {
   if (!Number.isFinite(ms)) return 0;
-  if (ms < 0) return 0; // ignore backward jumps in online loop
-  const MAX_FORWARD = 10 * 60 * 1000; // cap +10 min per tick
-  return Math.min(ms, MAX_FORWARD);
+  if (ms < 0) return 0;
+  return Math.min(ms, 10 * 60 * 1000);
 }
 async function loadImageSafe(src: string): Promise<{ src: string; img: HTMLImageElement } | null> {
   return new Promise((resolve) => {
@@ -761,43 +852,29 @@ async function loadImageSafe(src: string): Promise<{ src: string; img: HTMLImage
   });
 }
 
-function prettyName(f: string) {
-  if (f.endsWith("_child")) {
-    const base = f.replace("_child", "");
-    const cap = base === "we" ? "WE" : base.charAt(0).toUpperCase() + base.slice(1);
-    return `${cap} (child)`;
-    }
-  return f;
-}
-
-function deadCandidates(form: FormKey): string[] {
-  return [
-    `/sprites/${String(form)}/dead.png`,        // per-form
-    `/sprites/dead/${String(form)}.png`,        // optional per-form in /dead
-    DEAD_FALLBACK,                              // global fallback
-  ];
-}
-
-/** Offline minute-by-minute simulation (stats+illness+catastrophes). */
+/** Offline minute-by-minute simulation */
 function simulateOffline(args: {
-  startWall: number; minutes: number; startAgeMs: number;
-  startStats: Stats; startSick: boolean; cataCount0: number;
+  startWall: number;
+  minutes: number;
+  startAgeMs: number;
+  startStats: Stats;
+  startSick: boolean;
+  cataCount0: number;
   sleepCheck: (ts: number) => boolean;
 }): { stats: Stats; sick: boolean; cataIncrements: number } {
   let s = { ...args.startStats };
   let sick = args.startSick;
   let cataIncrements = 0;
 
-  // per-minute rates (consistent with online)
   const hungerPerMinNormal = 1 / 90;
   const healthPerMinNormal = 1 / (10 * 60);
-  const happyPerMinNormal  = 1 / (12 * 60);
-  const dirtPerMinNormal   = 1 / (12 * 60);
+  const happyPerMinNormal = 1 / (12 * 60);
+  const dirtPerMinNormal = 1 / (12 * 60);
 
   const healthPerMinSick = 1 / 7;
-  const happyPerMinSick  = 1 / 8;
+  const happyPerMinSick = 1 / 8;
 
-  const hungerPerMinFast = 1; // catastrophe drains ~all hunger in 1 min
+  const hungerPerMinFast = 1;
 
   let ageAtMinuteStart = args.startAgeMs;
 
@@ -807,29 +884,32 @@ function simulateOffline(args: {
 
     ageAtMinuteStart += 60000;
 
-    // Catastrophe: available after 2 days; first 3 overall guaranteed, then 90%/min
+    // After 2d age: first 3 catastrophes guaranteed, then 90%/min
     let catastropheActive = false;
     if (ageAtMinuteStart >= 2 * 24 * 3600_000) {
       const currentCount = Number(localStorage.getItem(CATA_COUNT_KEY) || args.cataCount0);
       const must = currentCount + cataIncrements < 3;
       const roll = Math.random() < 0.9;
-      if (must || roll) { catastropheActive = true; cataIncrements += 1; }
+      if (must || roll) {
+        catastropheActive = true;
+        cataIncrements += 1;
+      }
     }
 
     if (!sleeping) {
       const hungerDrop = catastropheActive ? hungerPerMinFast : hungerPerMinNormal;
       const healthDrop = sick ? healthPerMinSick : healthPerMinNormal;
-      const happyDrop  = sick ? happyPerMinSick  : happyPerMinNormal;
-      const dirtDrop   = dirtPerMinNormal;
+      const happyDrop = sick ? happyPerMinSick : happyPerMinNormal;
+      const dirtDrop = dirtPerMinNormal;
 
       s = clampStats({
         cleanliness: s.cleanliness - dirtDrop,
-        hunger:      s.hunger      - hungerDrop,
-        happiness:   s.happiness   - happyDrop,
-        health:      s.health      - healthDrop,
+        hunger: s.hunger - hungerDrop,
+        happiness: s.happiness - happyDrop,
+        health: s.health - healthDrop,
       });
 
-      // illness rolls (coarse minute scaling)
+      // Illness rolls (minute granularity)
       if (!sick) {
         const lowClean = 1 - s.cleanliness;
         const p = 0.02 + 0.3 * 0.3 + 0.2 * lowClean;
@@ -839,13 +919,13 @@ function simulateOffline(args: {
       }
     }
 
-    if (s.hunger <= 0 || s.health <= 0) break; // died offline; will be shown on mount
+    if (s.hunger <= 0 || s.health <= 0) break;
   }
 
   return { stats: clampStats(s), sick, cataIncrements };
 }
 
-/** UI bits */
+/** UI atoms */
 function Bar({ label, value, h = 6 }: { label: string; value: number; h?: number }) {
   const pct = Math.max(0, Math.min(1, value)) * 100;
   return (
