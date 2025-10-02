@@ -1,4 +1,6 @@
 // src/game/catalog.ts
+// Catalog that matches folder structure /public/sprites/<form>/<anim>/<NNN>.png
+
 export type AnimKey = "idle" | "walk" | "sick" | "sad" | "sleep" | "unhappy";
 export type FormKey =
   | "egg"
@@ -11,7 +13,7 @@ const f = (form: string, anim: AnimKey, frames: string[]) =>
   frames.map(n => `/sprites/${form}/${anim}/${n}.png`);
 
 const ONE = ["000"];
-const TWO = ["000","001"];
+const TWO = ["000", "001"]; // walk prefers 2+ frames
 
 export const catalog: Record<FormKey, AnimSet> = {
   egg:            { idle: f("egg","idle",ONE),            walk: f("egg","walk",TWO),            sick: f("egg","sick",ONE),            sad: f("egg","sad",ONE),            sleep: f("egg","sleep",ONE) },
