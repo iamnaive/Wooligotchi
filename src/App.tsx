@@ -1,3 +1,4 @@
+// src/App.tsx
 import React, { useMemo, useState, useEffect } from "react";
 import {
   http,
@@ -77,9 +78,10 @@ function short(addr?: `0x${string}`) {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
-/* ===== Lives gate ===== */
+/* ===== Lives gate (1 NFT = 1 life) ===== */
 const LIVES_KEY = "wg_lives_v1";
 const lKey = (cid:number, addr:string)=>`${cid}:${addr.toLowerCase()}`;
+
 function getLivesLocal(cid:number, addr?:`0x${string}`|null){
   if (!addr) return 0;
   try {
@@ -88,6 +90,7 @@ function getLivesLocal(cid:number, addr?:`0x${string}`|null){
     return map[lKey(cid, addr)] ?? 0;
   } catch { return 0; }
 }
+
 function useLivesGate(chainId:number, address?:`0x${string}`|null){
   const [lives, setLives] = React.useState(0);
   React.useEffect(()=>{
@@ -103,6 +106,24 @@ function useLivesGate(chainId:number, address?:`0x${string}`|null){
   return lives;
 }
 
+// Spend exactly one life for current address+chain and notify listeners
+function spendOneLife(chainId:number, address?:`0x${string}`|null) {
+  if (!address) return;
+  try {
+    const raw = localStorage.getItem(LIVES_KEY);
+    const map = raw ? (JSON.parse(raw) as Record<string, number>) : {};
+    const key = lKey(chainId, address);
+    const cur = map[key] ?? 0;
+    if (cur > 0) {
+      map[key] = cur - 1;
+      localStorage.setItem(LIVES_KEY, JSON.stringify(map));
+      window.dispatchEvent(new Event("wg:lives-changed"));
+    }
+  } catch (e) {
+    console.error("spendOneLife failed", e);
+  }
+}
+
 /* ===== PetConfig adapter ===== */
 type PetConfig = {
   name: string;
@@ -113,7 +134,7 @@ function makeConfigFromForm(form: FormKey): PetConfig {
   return { name: "Tamagotchi", fps: 8, anims: catalog[form] };
 }
 
-/* ===== Evolution logic ===== */
+/* ===== Evolution logic (random after egg_adult) ===== */
 const FORM_KEY_STORAGE = "wg_form_v1";
 function loadForm(): FormKey {
   const raw = localStorage.getItem(FORM_KEY_STORAGE);
@@ -135,7 +156,7 @@ function nextFormRandom(current: FormKey): FormKey {
   // charN -> charN_adult
   const map: Record<FormKey, FormKey> = {
     egg: "egg_adult",
-    egg_adult: "char1", // not used here due to branch above
+    egg_adult: "char1", // not used because of branch above
     char1: "char1_adult",
     char1_adult: "char1_adult",
     char2: "char2_adult",
@@ -257,7 +278,7 @@ function AppInner() {
     }
   };
 
-  // Expose evolve action (can be called from the game UI)
+  // Evolve flow from game UI
   const evolve = React.useCallback(() => {
     const next = nextFormRandom(form);
     setForm(next);
@@ -279,6 +300,7 @@ function AppInner() {
           </button>
         ) : (
           <div className="walletRow">
+            <span className="pill">Lives: {lives}</span>
             <span className="pill">{address ? `${address.slice(0,6)}…${address.slice(-4)}` : "—"}</span>
             <span className="muted">
               {balance ? `${Number(balance.formatted).toFixed(4)} ${balance.symbol}` : "—"}
@@ -309,7 +331,9 @@ function AppInner() {
           <GameProvider config={petConfig}>
             <Tamagotchi
               currentForm={form}
-              onEvolve={evolve}   // game can call to evolve; random branch handled here
+              onEvolve={evolve}
+              lives={lives}
+              onLoseLife={() => spendOneLife(MONAD_CHAIN_ID, address)}
             />
           </GameProvider>
         </>
