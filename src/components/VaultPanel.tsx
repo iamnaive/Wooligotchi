@@ -414,4 +414,4 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
       <div className="mt-1 text-sm">Lives: <span className="font-semibold">{lives}</span></div>
     </div>
   );
-}
+} 
