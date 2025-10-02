@@ -3,13 +3,15 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { FormKey, catalog } from "../game/catalog";
 
 /**
- * Tamagotchi scene
- * - 3 стата: Cleanliness / Hunger / Happiness (health — внутренняя)
- * - Болезни, какашки (png), события 2-го дня (80% катастрофа на 1 минуту)
- * - Сон (22:00–08:30 по умолчанию) + ручная настройка ОДИН раз (lock)
- * - Офлайн catch-up (пересчитываем простой)
+ * Tamagotchi scene (stable)
+ * - 3 стата: Cleanliness / Hunger / Happiness (+ внутренний Health)
+ * - Болезни, какахи (png), событие 2-го дня (80% катастрофа на 1 минуту)
+ * - Сон: авто 22:00–08:30 или ручная настройка ОДИН раз (Save & lock)
+ * - Офлайн catch-up (пересчёт простоя)
  * - Анти-чит по времени (clamp dt)
- * - Фикс "анимация ходьбы замирает": один устойчивый rAF-цикл; все состояния читаются через refs
+ * - Устойчивый rAF (анимация ходьбы не замирает)
+ * - Аватар рисуется в canvas сразу после BG (на «заднем фоне»)
+ * - Все элементы сцены, кроме BG, опущены на 26px вниз
  */
 
 export default function Tamagotchi({
@@ -27,11 +29,14 @@ export default function Tamagotchi({
   const LOGICAL_W = 320;
   const LOGICAL_H = 180;
   const FPS = 6;
-  const WALK_SPEED = 42; // px/s (в логических координатах)
+  const WALK_SPEED = 42; // px/s
   const MAX_W = 720;
   const CANVAS_H = 360;
   const BAR_H = 6;
   const BASE_GROUND = 48;
+
+  const Y_SHIFT = 26;              // смещение вниз для ВСЕГО, кроме BG
+  const HEAL_COOLDOWN_MS = 60_000; // перезарядка лечения
 
   // пер-форма тюнинги
   const SCALE: Partial<Record<FormKey, number>> = { egg: 0.66 };
@@ -42,7 +47,6 @@ export default function Tamagotchi({
   const POOP_SRCS = ["/sprites/poop/poop1.png", "/sprites/poop/poop2.png", "/sprites/poop/poop3.png"];
   const DEAD_MAP: Partial<Record<FormKey, string>> = {
     egg: "/sprites/dead/egg_dead.png",
-    // char1: "/sprites/dead/char1_dead.png", ...
   };
   const DEAD_FALLBACK = "/sprites/dead.png";
 
@@ -66,6 +70,7 @@ export default function Tamagotchi({
   const [isSick, setIsSick] = useState(false);
   const [isDead, setIsDead] = useState(false);
   const [deathReason, setDeathReason] = useState<string | null>(null);
+  const [lastHealAt, setLastHealAt] = useState<number>(0);
 
   // Сон: авто или ручной (Один раз — lock)
   const [useAutoTime, setUseAutoTime] = useState<boolean>(() => !localStorage.getItem(SLEEP_LOCK_KEY));
@@ -86,7 +91,7 @@ export default function Tamagotchi({
   });
   const [catastrophe, setCatastrophe] = useState<Catastrophe | null>(null);
 
-  // Refs для устойчивого rAF (не пересоздаём цикл при каждом изменении состояния)
+  // Refs для устойчивого rAF
   const animRef = useLatest(anim);
   const statsRef = useLatest(stats);
   const sickRef = useLatest(isSick);
@@ -105,6 +110,7 @@ export default function Tamagotchi({
   /** ===== Catalog / assets ===== */
   const safeForm = (f: FormKey) => (catalog[f] ? f : ("egg" as FormKey));
   const def = useMemo(() => (catalog[safeForm(currentForm)] || {}) as AnyAnimSet, [currentForm]);
+  const avatarSrc = useMemo(() => def.idle?.[0] ?? def.walk?.[0] ?? "", [def]);
 
   const urls = useMemo(() => {
     const set = new Set<string>();
@@ -112,13 +118,12 @@ export default function Tamagotchi({
     (["idle", "walk", "sick", "sad", "unhappy", "sleep"] as AnimKey[]).forEach((k) => {
       (def[k] ?? []).forEach((u) => set.add(u));
     });
+    if (avatarSrc) set.add(avatarSrc);
     POOP_SRCS.forEach((u) => set.add(u));
     const dead = DEAD_MAP[currentForm] ?? DEAD_FALLBACK;
     if (dead) set.add(dead);
     return Array.from(set);
-  }, [def, currentForm]);
-
-  const avatarSrc = useMemo(() => def.idle?.[0] ?? def.walk?.[0] ?? "", [def]);
+  }, [def, currentForm, avatarSrc]);
 
   /** ===== Sleep calc ===== */
   function isSleepingAt(ts: number) {
@@ -258,6 +263,8 @@ export default function Tamagotchi({
   }, []);
 
   /** ===== Actions ===== */
+  const canHeal = !isDead && Date.now() - lastHealAt >= HEAL_COOLDOWN_MS;
+
   const act = {
     feed: () => {
       if (deadRef.current) return;
@@ -272,6 +279,12 @@ export default function Tamagotchi({
       if (deadRef.current) return;
       setPoops([]);
       setStats((s) => clampStats({ ...s, cleanliness: Math.max(s.cleanliness, 0.92), happiness: s.happiness + 0.02 }));
+    },
+    heal: () => {
+      if (deadRef.current || !canHeal) return;
+      setIsSick(false);
+      setStats((s) => clampStats({ ...s, health: Math.min(1, s.health + 0.25), happiness: s.happiness + 0.05 }));
+      setLastHealAt(Date.now());
     },
   };
 
@@ -307,7 +320,6 @@ export default function Tamagotchi({
   useEffect(() => {
     let alive = true;
 
-    // preload
     Promise.all(urls.map(loadImageSafe)).then((pairs) => {
       if (!alive) return;
       const images: Record<string, HTMLImageElement> = {};
@@ -319,7 +331,6 @@ export default function Tamagotchi({
       alive = false;
       cancelAnimationFrame((window as any).__wg_raf || 0);
     };
-    // запускать цикл только если сменились ассеты/форма
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urls.join("|"), currentForm]);
 
@@ -339,8 +350,7 @@ export default function Tamagotchi({
       const containerH = CANVAS_H;
       const target = LOGICAL_W / LOGICAL_H;
       const box = containerW / containerH;
-      let cssW = containerW,
-        cssH = containerH;
+      let cssW = containerW, cssH = containerH;
       if (box > target) cssW = Math.round(containerH * target);
       else cssH = Math.round(containerW / target);
       canvas.style.width = cssW + "px";
@@ -360,7 +370,7 @@ export default function Tamagotchi({
     }
     resize();
 
-    // анимационные параметры
+    // параметры
     const scale = SCALE[safeForm(currentForm)] ?? 1;
     const BASELINE = LOGICAL_H - BASE_GROUND + (BASELINE_NUDGE[safeForm(currentForm)] ?? 0);
 
@@ -380,7 +390,7 @@ export default function Tamagotchi({
       // очистка
       ctx.clearRect(0, 0, LOGICAL_W, LOGICAL_H);
 
-      // фон
+      // BG без сдвига
       const bg = images[BG_SRC];
       if (bg) {
         const scaleBG = Math.max(LOGICAL_W / bg.width, LOGICAL_H / bg.height);
@@ -391,6 +401,28 @@ export default function Tamagotchi({
         ctx.drawImage(bg, dx, dy, dw, dh);
       }
 
+      // всё остальное со сдвигом вниз
+      ctx.save();
+      ctx.translate(0, Y_SHIFT);
+
+      // АВАТАР на заднем фоне (после BG, до сущностей)
+      if (avatarSrc) {
+        const av = images[avatarSrc];
+        if (av) {
+          const aw = 40, ah = 40, pad = 8;
+          const ax = LOGICAL_W - pad - aw;
+          const ay = pad;
+          ctx.save();
+          ctx.globalAlpha = 0.6;
+          ctx.fillStyle = "black";
+          roundRect(ctx, ax - 2, ay - 2, aw + 4, ah + 4, 6);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+          ctx.drawImage(av, ax, ay, aw, ah);
+          ctx.restore();
+        }
+      }
+
       // поопсы
       const curPoops = poopsRef.current;
       if (curPoops.length) {
@@ -398,16 +430,15 @@ export default function Tamagotchi({
           const img = images[p.src];
           const px = Math.round(p.x);
           const py = Math.round(BASELINE - 6);
-          if (img) {
-            ctx.drawImage(img, px, py - 12, 12, 12);
-          } else {
+          if (img) ctx.drawImage(img, px, py - 12, 12, 12);
+          else {
             ctx.font = "10px monospace";
             ctx.fillText("💩", px, py);
           }
         }
       }
 
-      // текущая анимация и кадры (решаем на каждом кадре, но лёгко)
+      // текущая анимация и кадры
       const chosenAnim = (() => {
         if (deadRef.current) return "idle";
         const nowSleeping = isSleepingAt(Date.now());
@@ -424,18 +455,13 @@ export default function Tamagotchi({
       const drawW = Math.round((base?.width ?? 32) * scale);
       const drawH = Math.round((base?.height ?? 32) * scale);
 
-      // движение (только не во сне и не мёртвый)
+      // движение
       if (!deadRef.current && !isSleepingAt(Date.now())) {
-        x += dir * (WALK_SPEED * dt) / 1000;
+        x += (dir * WALK_SPEED * dt) / 1000;
         const minX = 0;
         const maxX = LOGICAL_W - drawW;
-        if (x < minX) {
-          x = minX;
-          dir = 1;
-        } else if (x > maxX) {
-          x = maxX;
-          dir = -1;
-        }
+        if (x < minX) { x = minX; dir = 1; }
+        else if (x > maxX) { x = maxX; dir = -1; }
       }
 
       // переключение кадров
@@ -472,10 +498,12 @@ export default function Tamagotchi({
         ctx.restore();
       }
 
-      // баннеры
+      // баннеры (тоже опущены)
       const cat = catastropheRef.current;
       if (cat && Date.now() < cat.until) drawBanner(ctx, LOGICAL_W, `⚠ ${cat.cause}! stats draining fast`);
       if (!deadRef.current && isSleepingAt(Date.now())) drawBanner(ctx, LOGICAL_W, "😴 Sleeping");
+
+      ctx.restore(); // конец Y_SHIFT слоя
     };
 
     (window as any).__wg_raf = requestAnimationFrame(loop);
@@ -489,33 +517,6 @@ export default function Tamagotchi({
   }
 
   /** ===== UI ===== */
-  const Avatar = avatarSrc ? (
-    <div
-      style={{
-        position: "absolute",
-        right: 14, // сдвиг внутрь, чтобы не «съедало» край
-        top: 12,
-        width: 60,
-        height: 60,
-        borderRadius: 12,
-        background: "rgba(0,0,0,0.35)",
-        border: "1px solid rgba(255,255,255,0.2)",
-        display: "grid",
-        placeItems: "center",
-        backdropFilter: "blur(4px)",
-        pointerEvents: "none",
-      }}
-    >
-      <img
-        src={avatarSrc}
-        alt="pet"
-        draggable={false}
-        style={{ width: 40, height: 40, imageRendering: "pixelated", display: "block" }}
-      />
-      <div style={{ position: "absolute", bottom: 4, right: 6, fontSize: 11, opacity: 0.95 }}>❤️ {Math.round(stats.health * 100)}%</div>
-    </div>
-  ) : null;
-
   const DeathOverlay = isDead ? (
     <OverlayCard>
       <div style={{ fontSize: 18, marginBottom: 6 }}>Your pet has died</div>
@@ -548,7 +549,6 @@ export default function Tamagotchi({
         }}
       >
         <canvas ref={canvasRef} style={{ display: "block", imageRendering: "pixelated", background: "transparent", borderRadius: 12 }} />
-        {Avatar}
         {DeathOverlay}
       </div>
 
@@ -571,26 +571,20 @@ export default function Tamagotchi({
           pointerEvents: isDead ? ("none" as const) : ("auto" as const),
         }}
       >
-        <button className="btn" onClick={act.feed}>
-          🍗 Feed
+        <button className="btn" onClick={act.feed}>🍗 Feed</button>
+        <button className="btn" onClick={act.play}>🎮 Play</button>
+        <button className="btn" onClick={act.heal} disabled={!canHeal}>
+          💊 Heal{!canHeal ? " (cooldown)" : ""}
         </button>
-        <button className="btn" onClick={act.play}>
-          🎮 Play
-        </button>
-        <button className="btn" onClick={act.clean}>
-          🧻 Clean
-        </button>
-        <button className="btn" onClick={() => setAnim((a) => (a === "walk" ? "idle" : "walk"))}>
-          Toggle Walk/Idle
-        </button>
+        <button className="btn" onClick={act.clean}>🧻 Clean</button>
+        <button className="btn" onClick={() => setAnim((a) => (a === "walk" ? "idle" : "walk"))}>Toggle Walk/Idle</button>
         {!!onEvolve && (
           <button className="btn btn-primary" onClick={() => onEvolve()}>
             ⭐ Evolve (debug)
           </button>
         )}
         <span className="muted" style={{ alignSelf: "center" }}>
-          Poop: {poops.length} | Form: {currentForm} {isSick ? " | 🤒 Sick" : ""}{" "}
-          {catastrophe && Date.now() < catastrophe.until ? " | ⚠ Event" : ""}
+          Poop: {poops.length} | Form: {currentForm} {isSick ? " | 🤒 Sick" : ""} {catastrophe && Date.now() < catastrophe.until ? " | ⚠ Event" : ""}
         </span>
       </div>
 
@@ -606,12 +600,7 @@ export default function Tamagotchi({
         }}
       >
         <label style={{ display: "flex", alignItems: "center", gap: 6, opacity: sleepLocked ? 0.5 : 1 }}>
-          <input
-            type="checkbox"
-            checked={useAutoTime}
-            disabled={sleepLocked}
-            onChange={(e) => setUseAutoTime(e.target.checked)}
-          />
+          <input type="checkbox" checked={useAutoTime} disabled={sleepLocked} onChange={(e) => setUseAutoTime(e.target.checked)} />
           Auto local sleep 22:00–08:30
         </label>
         {!useAutoTime && (
@@ -660,9 +649,7 @@ function useLatest<T>(v: T) {
   }, [v]);
   return r;
 }
-function clamp01(x: number) {
-  return Math.max(0, Math.min(1, x));
-}
+function clamp01(x: number) { return Math.max(0, Math.min(1, x)); }
 function clampStats(s: Stats): Stats {
   return {
     cleanliness: clamp01(s.cleanliness),
@@ -671,9 +658,7 @@ function clampStats(s: Stats): Stats {
     health: clamp01(s.health),
   };
 }
-function pickOne<T>(arr: readonly T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)]!;
-}
+function pickOne<T>(arr: readonly T[]): T { return arr[Math.floor(Math.random() * arr.length)]!; }
 function drawBanner(ctx: CanvasRenderingContext2D, width: number, text: string) {
   const pad = 4;
   ctx.save();
@@ -705,6 +690,15 @@ async function loadImageSafe(src: string): Promise<{ src: string; img: HTMLImage
       resolve(null);
     }
   });
+}
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
 }
 
 /** Compact progress bar */
