@@ -15,7 +15,7 @@ import { defineChain } from "viem";
 import VaultPanel from "./components/VaultPanel";
 import Tamagotchi from "./components/Tamagotchi";
 import { GameProvider } from "./game/useGame";
-import { PetConfig } from "./game/types";
+import { AnimSet, FormKey, catalog } from "./game/catalog";
 import "./styles.css";
 
 /* ===== ENV ===== */
@@ -56,9 +56,7 @@ const connectorsList = [
             typeof window !== "undefined"
               ? window.location.origin
               : "https://example.com",
-          icons: [
-            "https://raw.githubusercontent.com/twitter/twemoji/master/assets/svg/1f423.svg",
-          ],
+          icons: ["https://raw.githubusercontent.com/twitter/twemoji/master/assets/svg/1f423.svg"],
         },
       })
     : null,
@@ -79,7 +77,7 @@ function short(addr?: `0x${string}`) {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
-/* ===== Lives gate (local storage) ===== */
+/* ===== Lives gate ===== */
 const LIVES_KEY = "wg_lives_v1";
 const lKey = (cid:number, addr:string)=>`${cid}:${addr.toLowerCase()}`;
 function getLivesLocal(cid:number, addr?:`0x${string}`|null){
@@ -105,23 +103,22 @@ function useLivesGate(chainId:number, address?:`0x${string}`|null){
   return lives;
 }
 
-/* ===== TEMP PET CONFIG (replace frames with your assets) ===== */
-const petConfig: PetConfig = {
-  name: "Tamagotchi",
-  fps: 8,
-  anims: {
-    idle:  ["/sprites/idle_1.png","/sprites/idle_2.png","/sprites/idle_3.png"],
-    eat:   ["/sprites/eat_1.png","/sprites/eat_2.png"],
-    play:  ["/sprites/play_1.png","/sprites/play_2.png","/sprites/play_3.png"],
-    sleep: ["/sprites/sleep_1.png","/sprites/sleep_2.png"],
-    sick:  ["/sprites/sick_1.png","/sprites/sick_2.png"],
-    poop:  ["/sprites/poop_1.png","/sprites/poop_2.png"],
-    clean: ["/sprites/clean_1.png","/sprites/clean_2.png"],
-    die:   ["/sprites/die_1.png","/sprites/die_2.png","/sprites/die_3.png"],
-  }
+/* ===== PetConfig adapter ===== */
+type PetConfig = {
+  name: string;
+  fps?: number;
+  anims: AnimSet;
 };
 
-/* ===== WALLET PICKER MODAL ===== */
+function makeConfigFromForm(form: FormKey): PetConfig {
+  return {
+    name: "Tamagotchi",
+    fps: 8,
+    anims: catalog[form],
+  };
+}
+
+/* ===== Wallet Picker ===== */
 function WalletPicker({
   open,
   onClose,
@@ -164,7 +161,7 @@ function WalletPicker({
   );
 }
 
-/* ===== SPLASH (start/gate) ===== */
+/* ===== Splash ===== */
 function Splash({ children }: { children?: React.ReactNode }) {
   return (
     <section className="card splash">
@@ -177,7 +174,7 @@ function Splash({ children }: { children?: React.ReactNode }) {
   );
 }
 
-/* ===== MAIN APP CONTENT ===== */
+/* ===== MAIN APP ===== */
 function AppInner() {
   const { address, isConnected, status } = useAccount();
   const chainId = useChainId();
@@ -187,6 +184,10 @@ function AppInner() {
   const { data: balance } = useBalance({ address, chainId, query: { enabled: !!address } });
   const [pickerOpen, setPickerOpen] = useState(false);
   const lives = useLivesGate(MONAD_CHAIN_ID, address);
+
+  // Active form state (you can wire evolution logic later)
+  const [form, setForm] = useState<FormKey>("egg");
+  const petConfig = useMemo(() => makeConfigFromForm(form), [form]);
 
   const walletItems = useMemo(
     () =>
@@ -239,7 +240,7 @@ function AppInner() {
           </button>
         ) : (
           <div className="walletRow">
-            <span className="pill">{short(address)}</span>
+            <span className="pill">{address ? `${address.slice(0,6)}…${address.slice(-4)}` : "—"}</span>
             <span className="muted">
               {balance ? `${Number(balance.formatted).toFixed(4)} ${balance.symbol}` : "—"}
             </span>
@@ -251,7 +252,7 @@ function AppInner() {
         )}
       </header>
 
-      {/* Start / gate screens */}
+      {/* Start / gate */}
       {!isConnected ? (
         <Splash>
           <div style={{ display:"flex", justifyContent:"center", gap:12, marginTop:10 }}>
@@ -261,14 +262,38 @@ function AppInner() {
       ) : lives <= 0 ? (
         <Splash>
           <div className="muted">Send 1 NFT → get 1 life</div>
-          {/* Minimal CTA (single big button) */}
+          {/* One-button CTA from your VaultPanel */}
           <VaultPanel mode="cta" />
         </Splash>
       ) : (
-        /* Game visible only when user has lives */
-        <GameProvider config={petConfig}>
-          <Tamagotchi />
-        </GameProvider>
+        <>
+          {/* Simple temporary selector to test forms (remove in production, wire evolution logic) */}
+          <section className="card" style={{marginTop:12}}>
+            <div className="card-title">Form (debug)</div>
+            <select
+              className="input"
+              value={form}
+              onChange={(e)=>setForm(e.target.value as FormKey)}
+              style={{ maxWidth: 280 }}
+            >
+              <option value="egg">Egg (baby)</option>
+              <option value="egg_adult">Egg (adult)</option>
+              <option value="char1">Character 1</option>
+              <option value="char1_adult">Character 1 (adult)</option>
+              <option value="char2">Character 2</option>
+              <option value="char2_adult">Character 2 (adult)</option>
+              <option value="char3">Character 3</option>
+              <option value="char3_adult">Character 3 (adult)</option>
+              <option value="char4">Character 4</option>
+              <option value="char4_adult">Character 4 (adult)</option>
+            </select>
+          </section>
+
+          {/* Game */}
+          <GameProvider config={petConfig}>
+            <Tamagotchi />
+          </GameProvider>
+        </>
       )}
 
       <footer className="foot">
@@ -286,7 +311,6 @@ function AppInner() {
   );
 }
 
-/* ===== ROOT ===== */
 export default function App() {
   return (
     <WagmiProvider config={config}>
