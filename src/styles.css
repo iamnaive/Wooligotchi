@@ -143,19 +143,19 @@ html,body{
 .avatar{
   grid-column: 1;
   grid-row: 1 / span 1;
-  height: 220px;
+  height: 240px;                     /* increased to align with stage */
   display:grid; place-items:center;
-  border: 2px solid #a06bff66; /* purple frame */
+  border: 2px solid #a06bff66;       /* purple frame */
   border-radius: 16px;
   background: linear-gradient(180deg,#1a1530,#12142a);
 }
 
-/* ===== Stage (red box) ===== */
+/* ===== Stage (red box) — hosts PixelViewport ===== */
 .stage{
   grid-column: 2;
   grid-row: 1;
-  min-height: 220px;
-  border: 2px solid #ff5b5b66; /* red frame */
+  min-height: 240px;                 /* enough space for 320×180 upscaling */
+  border: 2px solid #ff5b5b66;       /* red frame */
   border-radius: 16px;
   overflow: hidden;
   position: relative;
@@ -164,11 +164,16 @@ html,body{
     linear-gradient(180deg,#0f1426,#0c1223);
 }
 
+/* PixelViewport wrapper inside stage — keep pixels crisp */
+.stage-viewport{
+  image-rendering: pixelated;
+}
+
 /* ===== HUD (yellow box) ===== */
 .hud{
   grid-column: 1 / span 2;
   grid-row: 2;
-  border:2px solid #ffd36d66; /* yellow frame */
+  border:2px solid #ffd36d66;        /* yellow frame */
   border-radius: 16px;
   padding: 12px;
   background: linear-gradient(180deg,#12172a,#0e1426);
@@ -176,9 +181,7 @@ html,body{
 }
 
 /* ===== Progress bars ===== */
-.stat{
-  display:grid; gap:6px;
-}
+.stat{ display:grid; gap:6px; }
 .stat-label{ font-size:12px; color:var(--muted); }
 .stat-bar{ height:8px; border-radius:999px; background:#14192e; border:1px solid #222846; overflow:hidden; }
 .stat-fill{ height:100%; background:linear-gradient(90deg,#7c4dff,#22b35b); box-shadow: 0 0 10px rgba(124,77,255,.35) inset; }
