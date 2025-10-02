@@ -503,7 +503,32 @@ export default function Tamagotchi({
       </div>
     </div>
   );
-
+/** Compact progress bar for stat lines */
+function Bar({ label, value, h = 6 }: { label: string; value: number; h?: number }) {
+  const pct = Math.max(0, Math.min(1, value)) * 100;
+  return (
+    <div>
+      <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 4 }}>{label}</div>
+      <div
+        style={{
+          height: h,
+          width: "100%",
+          borderRadius: Math.max(6, h),
+          background: "rgba(255,255,255,0.08)",
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            width: `${pct}%`,
+            height: "100%",
+            background: "linear-gradient(90deg, rgba(124,77,255,0.9), rgba(0,200,255,0.9))",
+          }}
+        />
+      </div>
+    </div>
+  );
+}
   // ---------- helpers ----------
   function spawnPoop() {
     setPoops((arr) => {
