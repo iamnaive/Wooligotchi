@@ -4,25 +4,45 @@ import { catalog, type FormKey, type AnimSet as AnyAnimSet } from "../game/catal
 
 /** ===== Visual & behavior constants ===== */
 const DEAD_FALLBACK = "/sprites/dead.png";
-// Avatar rendering cap (top-right). Sprite is scaled down if larger.
-const AVATAR_MAX_SIZE = 42; // logical pixels (set 40..48 to taste)
 
-/** Scaling:
- * - EGG_SCALE shrinks only the egg (native sprite -> multiplied by this factor).
- * - NON_EGG_SCALE shrinks non-egg forms relative to the egg's raw height.
- * - INVERT_WALK_FACING flips sprite so it faces movement direction if source art faces left.
+/** Avatar scaling in HUD (top-right):
+ * - If AVATAR_SCALE_CAP is a number, avatar is only scaled DOWN to fit the cap.
+ * - If AVATAR_SCALE_CAP is null, avatar is never scaled (original pixel size).
  */
-const EGG_SCALE = 0.7;      // egg ~30% smaller than native
-const NON_EGG_SCALE = 0.6;  // non-egg ~1.67x smaller than egg-height target
+const AVATAR_SCALE_CAP: number | null = null; // no autoscale per user request
+
+/** World sprite scaling (stage, not HUD):
+ * - EGG_SCALE shrinks the egg sprite.
+ * - NON_EGG_SCALE shrinks non-egg forms relative to egg raw height (keeps a consistent world size).
+ */
+const EGG_SCALE = 0.50;     // smaller egg in the world
+const NON_EGG_SCALE = 0.62; // tuned to keep parity vs egg target height
 const INVERT_WALK_FACING = false;
 
 /** Evolution timing */
-const EVOLVE_CHILD_AT = 60_000;             // egg -> child after 1 minute of total age
-const EVOLVE_ADULT_AT = 2 * 24 * 3600_000;  // child -> adult after 2 days of total age
+const EVOLVE_CHILD_AT = 60_000;             // egg -> child after 1 minute total age
+const EVOLVE_ADULT_AT = 2 * 24 * 3600_000;  // child -> adult after 2 days total age
 
-/** Asset constants */
+/** Asset constants (UI helpers) */
 const BG_SRC = "/bg/BG.png";
 const POOP_SRCS = ["/sprites/poop/poop1.png", "/sprites/poop/poop2.png", "/sprites/poop/poop3.png"];
+
+/** Food throw (3-frame) animation assets.
+ * Drop your files here (any size). Fallbacks (emoji) are used if missing.
+ * Folder suggestions:
+ *   /public/sprites/ui/food/burger/000.png,001.png,002.png
+ *   /public/sprites/ui/food/cake/000.png,001.png,002.png
+ */
+const FEED_FRAMES = {
+  burger: ["/sprites/ui/food/burger/000.png", "/sprites/ui/food/burger/001.png", "/sprites/ui/food/burger/002.png"],
+  cake:   ["/sprites/ui/food/cake/000.png",   "/sprites/ui/food/cake/001.png",   "/sprites/ui/food/cake/002.png"],
+} as const;
+
+/** Scoop (cleaning) sprite.
+ * Put image to: /public/sprites/ui/scoop.png
+ * Any aspect ratio is fine; will be autoscaled to reasonable height.
+ */
+const SCOOP_SRC = "/sprites/ui/scoop.png";
 
 /** Storage keys */
 const START_TS_KEY = "wg_start_ts_v2";
@@ -35,10 +55,32 @@ const SLEEP_FROM_KEY = "wg_sleep_from_v1";
 const SLEEP_TO_KEY = "wg_sleep_to_v1";
 
 /** Catastrophes schedule (absolute UTC ms) */
-const CATA_SCHEDULE_KEY = "wg_cata_schedule_v2"; // JSON:number[] planned start times
-const CATA_CONSUMED_KEY = "wg_cata_consumed_v2"; // JSON:number[] executed start times
+const CATA_SCHEDULE_KEY = "wg_cata_schedule_v2";
+const CATA_CONSUMED_KEY = "wg_cata_consumed_v2";
 const CATA_DURATION_MS = 60_000; // 1 minute visually + fast drain
 const CATASTROPHE_CAUSES = ["food poisoning", "mysterious flu", "meteor dust", "bad RNG", "doom day syndrome"] as const;
+
+/** Game field layout constants */
+const LOGICAL_W = 320, LOGICAL_H = 180;
+const FPS = 6, WALK_SPEED = 42;
+const MAX_W = 720, CANVAS_H = 360;
+const BAR_H = 6, BASE_GROUND = 48, Y_SHIFT = 26;
+const HEAL_COOLDOWN_MS = 60_000;
+
+/** Food logic constants */
+const FEED_COOLDOWN_MS = 5_000;   // per button
+const FEED_ANIM_TOTAL_MS = 600;   // total duration for 3 frames
+const FEED_FRAMES_COUNT = 3;      // exactly 3 frames
+const FEED_EFFECTS = {
+  burger: { hunger: +0.28, happiness: +0.06 },
+  cake:   { hunger: +0.22, happiness: +0.12 },
+};
+
+/** Cleaning (scoop) constants */
+const SCOOP_SPEED_PX_S = 160;        // horizontal speed
+const SCOOP_CLEAR_RADIUS = 18;       // distance to poop center to clear
+const SCOOP_HEIGHT_TARGET = 22;      // target drawn height in logical px
+const CLEAN_FINISH_CLEANLINESS = 0.95; // clamp up to this on finish
 
 export default function Tamagotchi({
   currentForm,
@@ -51,13 +93,6 @@ export default function Tamagotchi({
   onLoseLife?: () => void;
   onEvolve?: (next?: FormKey) => FormKey | void;
 }) {
-  /** ===== World/layout ===== */
-  const LOGICAL_W = 320, LOGICAL_H = 180;
-  const FPS = 6, WALK_SPEED = 42;
-  const MAX_W = 720, CANVAS_H = 360;
-  const BAR_H = 6, BASE_GROUND = 48, Y_SHIFT = 26;
-  const HEAL_COOLDOWN_MS = 60_000;
-
   /** Forms */
   const CHILD_CHOICES: FormKey[] = ["chog_child", "molandak_child", "moyaki_child", "we_child"];
   const ADULT_MAP: Record<string, FormKey> = {
@@ -78,8 +113,19 @@ export default function Tamagotchi({
     const nf = (map[f] || f) as FormKey;
     return (catalog[nf] ? nf : "egg") as FormKey;
   };
+
+  /** Controlled->uncontrolled handoff:
+   * We only sync currentForm ONCE on mount to avoid parent re-overriding our evolution (was causing "always Chog").
+   */
+  const firstSyncDone = useRef(false);
   const [form, setForm] = useState<FormKey>(() => normalizeForm(currentForm));
-  useEffect(() => { setForm(normalizeForm(currentForm)); }, [currentForm]);
+  useEffect(() => {
+    if (!firstSyncDone.current) {
+      setForm(normalizeForm(currentForm));
+      firstSyncDone.current = true;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentForm]);
 
   /** Core state */
   const [anim, setAnim] = useState<AnimKey>("walk");
@@ -89,6 +135,14 @@ export default function Tamagotchi({
   const [isDead, setIsDead] = useState(false);
   const [deathReason, setDeathReason] = useState<string | null>(null);
   const [lastHealAt, setLastHealAt] = useState<number>(0);
+
+  /** Food cooldowns & animation state */
+  const [lastBurgerAt, setLastBurgerAt] = useState<number>(0);
+  const [lastCakeAt, setLastCakeAt] = useState<number>(0);
+  const [foodAnim, setFoodAnim] = useState<FoodAnim | null>(null);
+
+  /** Cleaning (scoop) animation state */
+  const [cleaning, setCleaning] = useState<ScoopState | null>(null);
 
   /** Sleep window */
   const [useAutoTime, setUseAutoTime] = useState<boolean>(() => !localStorage.getItem(SLEEP_LOCK_KEY));
@@ -114,13 +168,19 @@ export default function Tamagotchi({
   const catastropheRef = useLatest(catastrophe);
   const ageRef = useLatest(ageMs);
   const formRef = useLatest(form);
+  const foodAnimRef = useLatest(foodAnim);
+  const cleaningRef = useLatest(cleaning);
+
+  // last drawn pet rect, used to anchor food animation near the pet's head
+  const petRectRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
+
   const sleepParamsRef = useRef({ useAutoTime, sleepStart, wakeTime, sleepLocked });
   useEffect(() => { sleepParamsRef.current = { useAutoTime, sleepStart, wakeTime, sleepLocked }; }, [useAutoTime, sleepStart, wakeTime, sleepLocked]);
 
   /** Canvas & RAF */
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const rafRef = useRef<number | null>(null); // prevents stacked loops
+  const rafRef = useRef<number | null>(null); // single RAF guard
 
   /** Catalog / frames */
   const safeForm = (f: FormKey) => (catalog[f] ? f : ("egg" as FormKey));
@@ -132,8 +192,13 @@ export default function Tamagotchi({
     set.add(BG_SRC);
     (["idle","walk","sick","sad","unhappy","sleep"] as AnimKey[]).forEach(k => (def[k] ?? []).forEach(u => set.add(u)));
     POOP_SRCS.forEach(u => set.add(u));
+    // food anim frames
+    FEED_FRAMES.burger.forEach(u => set.add(u));
+    FEED_FRAMES.cake.forEach(u => set.add(u));
+    // scoop
+    set.add(SCOOP_SRC);
+    // dead candidates and egg frames (for autoscale reference)
     deadCandidates(form).forEach(u => set.add(u));
-    // preload egg frames for autoscale reference
     const egg = catalog["egg"] || {};
     (egg.idle ?? egg.walk ?? []).forEach(u => set.add(u));
     return Array.from(set);
@@ -168,10 +233,7 @@ export default function Tamagotchi({
     return afterStart && beforeWake;
   }
 
-  /** Generate catastrophe schedule:
-   * - First at startTs + 1 minute (100%).
-   * - Exactly 3 more in [startTs+1d, startTs+2d), only while awake.
-   */
+  /** Generate catastrophe schedule */
   useEffect(() => {
     try {
       const schedRaw = localStorage.getItem(CATA_SCHEDULE_KEY);
@@ -183,7 +245,7 @@ export default function Tamagotchi({
       const firstAt = startTs + 60_000;
       if (!schedule.includes(firstAt)) schedule.push(firstAt);
 
-      // Ensure 4 total: 1 immediate + 3 in [day1, day2)
+      // Ensure 4 total: 1 immediate + 3 in [day1, day2) during awake time
       if (schedule.length < 4) {
         const day1 = startTs + 24 * 3600_000;
         const day2 = startTs + 48 * 3600_000;
@@ -194,7 +256,7 @@ export default function Tamagotchi({
         while (picks.length < need && guard++ < 2000) {
           const t = randInt(day1, day2 - CATA_DURATION_MS);
           const minute = Math.floor(t / 60_000) * 60_000;
-          if (isSleepingAt(minute)) continue;                // schedule only while awake
+          if (isSleepingAt(minute)) continue;
           if (schedule.includes(minute) || picks.includes(minute)) continue;
           picks.push(minute);
         }
@@ -249,7 +311,7 @@ export default function Tamagotchi({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** Online age ticker (perf-based, independent from system clock) */
+  /** Online age ticker (monotonic, perf-based) */
   useEffect(() => {
     let lastPerf = performance.now();
     const id = window.setInterval(() => {
@@ -290,20 +352,145 @@ export default function Tamagotchi({
 
   /** Evolution (equal probability from egg) */
   useEffect(() => {
+    // egg -> random child
     if (formRef.current === "egg" && ageRef.current >= EVOLVE_CHILD_AT) {
       const next = pickOne(CHILD_CHOICES);
-      onEvolve?.(next);
-      setForm(next);
+      const maybe = onEvolve?.(next);
+      setForm(normalizeForm((maybe || next) as FormKey));
       return;
     }
+    // child -> mapped adult
     if (String(formRef.current).endsWith("_child") && ageRef.current >= EVOLVE_ADULT_AT) {
       const adult = ADULT_MAP[String(formRef.current)];
-      if (adult) { onEvolve?.(adult); setForm(adult); }
+      if (adult) {
+        const maybe = onEvolve?.(adult);
+        setForm(normalizeForm((maybe || adult) as FormKey));
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ageMs, form]);
 
-  /** Periodic drains / illness / poop + online catastrophe triggering */
+  /** Poops load/save */
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(POOPS_KEY);
+      if (raw) {
+        const arr = JSON.parse(raw) as Poop[];
+        if (Array.isArray(arr)) setPoops(arr.slice(0, 12));
+      }
+    } catch {}
+  }, []);
+  useEffect(() => {
+    try { localStorage.setItem(POOPS_KEY, JSON.stringify(poops.slice(-12))); } catch {}
+  }, [poops]);
+
+  /** ===== Actions (with cooldowns / animations) ===== */
+  const nowMs = () => Date.now();
+  const canHeal = !isDead && nowMs() - lastHealAt >= HEAL_COOLDOWN_MS;
+  const canBurger = !isDead && nowMs() - lastBurgerAt >= FEED_COOLDOWN_MS;
+  const canCake   = !isDead && nowMs() - lastCakeAt   >= FEED_COOLDOWN_MS;
+  const canClean  = !isDead && !cleaningRef.current; // disabled during scoop pass
+
+  const act = {
+    feedBurger: () => {
+      if (!canBurger) return;
+      // stats effect
+      setStats((s) => clampStats({ ...s,
+        hunger: s.hunger + FEED_EFFECTS.burger.hunger,
+        happiness: s.happiness + FEED_EFFECTS.burger.happiness
+      }));
+      // poop chance
+      if (Math.random() < 0.7) spawnPoop();
+      // start 3-frame anim anchored near pet
+      setFoodAnim({ kind: "burger", startedAt: nowMs() });
+      setLastBurgerAt(nowMs());
+    },
+    feedCake: () => {
+      if (!canCake) return;
+      setStats((s) => clampStats({ ...s,
+        hunger: s.hunger + FEED_EFFECTS.cake.hunger,
+        happiness: s.happiness + FEED_EFFECTS.cake.happiness
+      }));
+      if (Math.random() < 0.5) spawnPoop();
+      setFoodAnim({ kind: "cake", startedAt: nowMs() });
+      setLastCakeAt(nowMs());
+    },
+    play: () => {
+      if (isDead) return;
+      setStats((s) => clampStats({ ...s, happiness: s.happiness + 0.2, health: Math.min(1, s.health + 0.03) }));
+    },
+    clean: () => {
+      if (!canClean) return;
+      // start scoop pass from right to left
+      const startX = LOGICAL_W + 10;
+      setCleaning({ x: startX, active: true });
+    },
+    heal: () => {
+      if (isDead || !canHeal) return;
+      setIsSick(false);
+      setStats((s) => clampStats({ ...s, health: Math.min(1, s.health + 0.25), happiness: s.happiness + 0.05 }));
+      setLastHealAt(nowMs());
+    },
+  };
+
+  /** Spend life to revive (keeps progress) */
+  const spendLifeToRevive = () => {
+    if (lives <= 0) return;
+    onLoseLife();
+    setIsDead(false);
+    setDeathReason(null);
+    setStats((s) =>
+      clampStats({
+        cleanliness: Math.max(s.cleanliness, 0.7),
+        hunger: 0.4,
+        happiness: Math.max(s.happiness, 0.5),
+        health: Math.max(s.health, 0.6),
+      })
+    );
+    setPoops([]);
+    setIsSick(false);
+    setCatastrophe(null);
+  };
+
+  /** New Game: full reset back to the very first egg (allowed only after death) */
+  const newGame = () => {
+    // Safety: only allow New Game after death to avoid accidental wipes
+    if (!deadRef.current) return;
+
+    try {
+      // Hard wipe all progression-related state
+      localStorage.removeItem(START_TS_KEY);
+      localStorage.removeItem(LAST_SEEN_KEY);
+      localStorage.removeItem(AGE_MS_KEY);
+      localStorage.removeItem(AGE_MAX_WALL_KEY);
+      localStorage.removeItem(POOPS_KEY);
+      localStorage.removeItem(CATA_SCHEDULE_KEY);
+      localStorage.removeItem(CATA_CONSUMED_KEY);
+      // NOTE: We intentionally keep user's sleep preferences (SLEEP_* keys)
+    } catch {}
+
+    // Reset in-memory state to the very beginning
+    setForm("egg");
+    setStats({ cleanliness: 0.9, hunger: 0.65, happiness: 0.6, health: 1.0 });
+    setPoops([]);
+    setIsSick(false);
+    setIsDead(false);
+    setDeathReason(null);
+    setCatastrophe(null);
+    setAgeMs(0);
+    setFoodAnim(null);
+    setCleaning(null);
+
+    // Re-seed fresh start timestamps so anti-rewind keeps working
+    const now = Date.now();
+    try {
+      localStorage.setItem(START_TS_KEY, String(now));
+      localStorage.setItem(LAST_SEEN_KEY, String(now));
+      localStorage.setItem(AGE_MAX_WALL_KEY, String(now));
+    } catch {}
+  };
+
+  /** ===== Periodic drains / illness / events ===== */
   useEffect(() => {
     let lastWall = Date.now();
     const id = window.setInterval(() => {
@@ -324,7 +511,6 @@ export default function Tamagotchi({
               localStorage.setItem(CATA_CONSUMED_KEY, JSON.stringify([...consumed, t].sort((a,b)=>a-b)));
             }
           } else if (now >= t + CATA_DURATION_MS) {
-            // safety mark if minute passed and wasn't marked (rare)
             if (!consumed.includes(t)) {
               localStorage.setItem(CATA_CONSUMED_KEY, JSON.stringify([...consumed, t].sort((a,b)=>a-b)));
             }
@@ -371,102 +557,6 @@ export default function Tamagotchi({
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  /** Poops load/save */
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(POOPS_KEY);
-      if (raw) {
-        const arr = JSON.parse(raw) as Poop[];
-        if (Array.isArray(arr)) setPoops(arr.slice(0, 12));
-      }
-    } catch {}
-  }, []);
-  useEffect(() => {
-    try { localStorage.setItem(POOPS_KEY, JSON.stringify(poops.slice(-12))); } catch {}
-  }, [poops]);
-
-  /** Actions */
-  const canHeal = !isDead && Date.now() - lastHealAt >= HEAL_COOLDOWN_MS;
-  const act = {
-    feed: () => {
-      if (deadRef.current) return;
-      setStats((s) => clampStats({ ...s, hunger: s.hunger + 0.25, happiness: s.happiness + 0.05 }));
-      if (Math.random() < 0.7) spawnPoop();
-    },
-    play: () => {
-      if (deadRef.current) return;
-      setStats((s) => clampStats({ ...s, happiness: s.happiness + 0.2, health: Math.min(1, s.health + 0.03) }));
-    },
-    clean: () => {
-      if (deadRef.current) return;
-      setPoops([]);
-      setStats((s) => clampStats({ ...s, cleanliness: Math.max(s.cleanliness, 0.92), happiness: s.happiness + 0.02 }));
-    },
-    heal: () => {
-      if (deadRef.current || !canHeal) return;
-      setIsSick(false);
-      setStats((s) => clampStats({ ...s, health: Math.min(1, s.health + 0.25), happiness: s.happiness + 0.05 }));
-      setLastHealAt(Date.now());
-    },
-  };
-
-  /** Spend life to revive (keeps progress) */
-  const spendLifeToRevive = () => {
-    if (lives <= 0) return;
-    onLoseLife();
-    setIsDead(false);
-    setDeathReason(null);
-    setStats((s) =>
-      clampStats({
-        cleanliness: Math.max(s.cleanliness, 0.7),
-        hunger: 0.4,
-        happiness: Math.max(s.happiness, 0.5),
-        health: Math.max(s.health, 0.6),
-      })
-    );
-    setPoops([]);
-    setIsSick(false);
-    setCatastrophe(null);
-  };
-
-  /** New Game: full reset back to the first egg (after death) */
-  const newGame = () => {
-    try {
-      localStorage.removeItem(START_TS_KEY);
-      localStorage.removeItem(LAST_SEEN_KEY);
-      localStorage.removeItem(AGE_MS_KEY);
-      localStorage.removeItem(AGE_MAX_WALL_KEY);
-      localStorage.removeItem(POOPS_KEY);
-      localStorage.removeItem(CATA_SCHEDULE_KEY);
-      localStorage.removeItem(CATA_CONSUMED_KEY);
-      // keep sleep preferences (do not wipe sleep window)
-    } catch {}
-    setForm("egg");
-    setStats({ cleanliness: 0.9, hunger: 0.65, happiness: 0.6, health: 1.0 });
-    setPoops([]);
-    setIsSick(false);
-    setIsDead(false);
-    setDeathReason(null);
-    setCatastrophe(null);
-    setAgeMs(0);
-    const now = Date.now();
-    try {
-      localStorage.setItem(START_TS_KEY, String(now));
-      localStorage.setItem(LAST_SEEN_KEY, String(now));
-      localStorage.setItem(AGE_MAX_WALL_KEY, String(now));
-    } catch {}
-  };
-
-  function spawnPoop() {
-    setPoops((arr) => {
-      const x = 8 + Math.random() * (LOGICAL_W - 16);
-      const src = pickOne(POOP_SRCS);
-      const max = 12;
-      const next = [...arr, { x, src }];
-      return next.slice(-max);
-    });
-  }
 
   /** ===== Render loop (single per-instance RAF) ===== */
   useEffect(() => {
@@ -553,50 +643,9 @@ export default function Tamagotchi({
         ctx.drawImage(bg, dx, dy, dw, dh);
       }
 
-      // --- Top-right avatar (draw with a soft max size cap) ---
-const now = Date.now();
-const sleepingNow = isSleepingAt(now);
-const avatarAnimKey: AnimKey = (() => {
-  if (deadRef.current) return "idle";
-  if (sleepingNow) return def.sleep?.length ? "sleep" : "idle";
-  if (sickRef.current && (def.sick?.length ?? 0) > 0) return "sick";
-  if (statsRef.current.happiness < 0.35) return (def.sad?.length ? "sad" : def.unhappy?.length ? "unhappy" : "idle") as AnimKey;
-  return def.idle?.length ? "idle" : "walk";
-})();
-const avatarFrames = (def[avatarAnimKey] ?? def.idle ?? def.walk ?? []) as string[];
-const avatarSrc = avatarFrames[0];
+      // --- HUD Avatar (top-right), no autoscale unless larger than cap ---
+      drawAvatarHUD(ctx, images);
 
-if (avatarSrc && images[avatarSrc]) {
-  const av = images[avatarSrc];
-
-  // Scale down only if the native sprite is larger than AVATAR_MAX_SIZE.
-  // This keeps pixel-sharp look while avoiding huge avatars (like a big egg PNG).
-  const nativeMax = Math.max(av.width, av.height);
-  const scale = nativeMax > AVATAR_MAX_SIZE ? (AVATAR_MAX_SIZE / nativeMax) : 1;
-  const aw = Math.round(av.width * scale);
-  const ah = Math.round(av.height * scale);
-
-  const padX = 10, padY = 6;
-  const ax = LOGICAL_W - padX - aw;
-  const ay = padY;
-
-  (ctx as any).imageSmoothingEnabled = false;
-  ctx.drawImage(av, ax, ay, aw, ah);
-
-  // HP badge anchored to bottom-right of the avatar
-  const hp = Math.round((statsRef.current.health ?? 0) * 100);
-  const label = `❤️ ${hp}%`;
-  ctx.font = "10px monospace";
-  ctx.textBaseline = "alphabetic";
-  const tw = ctx.measureText(label).width;
-  const tx = ax + aw - tw - 2;
-  const ty = ay + ah - 4;
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = "rgba(0,0,0,0.75)";
-  ctx.strokeText(label, tx, ty);
-  ctx.fillStyle = "#fff";
-  ctx.fillText(label, tx, ty);
-}
       // World layer (shifted down)
       ctx.save();
       ctx.translate(0, Y_SHIFT);
@@ -614,6 +663,8 @@ if (avatarSrc && images[avatarSrc]) {
       }
 
       // Choose world animation
+      const now = Date.now();
+      const sleepingNow = isSleepingAt(now);
       const chosenAnim: AnimKey = (() => {
         if (deadRef.current) return "idle";
         if (sleepingNow) return def.sleep?.length ? "sleep" : "idle";
@@ -665,10 +716,10 @@ if (avatarSrc && images[avatarSrc]) {
           const ix = Math.round((LOGICAL_W - w) / 2);
           const iy = Math.round(LOGICAL_H - BASE_GROUND - h);
           ctx.drawImage(deadImg, ix, iy, w, h);
+          petRectRef.current = { x: ix, y: iy, w, h };
         }
       } else if (frames.length) {
         ctx.save();
-        // Face movement direction
         let flip = dir === -1;
         if (INVERT_WALK_FACING) flip = !flip;
         if (flip) {
@@ -679,12 +730,71 @@ if (avatarSrc && images[avatarSrc]) {
         const img = images[frames[Math.min(frameIndex, frames.length - 1)]];
         if (img) ctx.drawImage(img, ix, iy, drawW, drawH);
         ctx.restore();
+        petRectRef.current = { x: ix, y: iy, w: drawW, h: drawH };
+      } else {
+        petRectRef.current = null;
+      }
+
+      // Cleaning (scoop pass) — moves right->left and clears poops in radius
+      if (cleaningRef.current && cleaningRef.current.active) {
+        const s = cleaningRef.current;
+        s.x -= (SCOOP_SPEED_PX_S * dt) / 1000; // move left
+        // draw scoop
+        const scoopImg = images[SCOOP_SRC];
+        const scoopH = SCOOP_HEIGHT_TARGET;
+        const scoopW = scoopImg ? Math.round((scoopImg.width / Math.max(1, scoopImg.height)) * scoopH) : 26;
+        const y = Math.round(LOGICAL_H - BASE_GROUND - scoopH + 2);
+        if (scoopImg) ctx.drawImage(scoopImg, Math.round(s.x), y, scoopW, scoopH);
+        else {
+          // fallback rectangle with emoji
+          ctx.fillStyle = "#c7cbe8";
+          ctx.fillRect(Math.round(s.x), y, scoopW, scoopH);
+          ctx.font = "12px monospace";
+          ctx.fillStyle = "#111";
+          ctx.fillText("🧹", Math.round(s.x) + 6, y + scoopH - 6);
+        }
+        // clear poops in radius from scoop front edge
+        const frontX = s.x + scoopW * 0.5;
+        const remaining = poopsRef.current.filter((p) => Math.abs(p.x - frontX) > SCOOP_CLEAR_RADIUS);
+        if (remaining.length !== poopsRef.current.length) setPoops(remaining);
+        // finish when passed left edge
+        if (s.x < -scoopW - 8) {
+          setCleaning(null);
+          setStats((st) => clampStats({ ...st, cleanliness: Math.max(st.cleanliness, CLEAN_FINISH_CLEANLINESS), happiness: st.happiness + 0.02 }));
+        }
       }
 
       // Banners
       const cat = catastropheRef.current;
       if (cat && now < cat.until) drawBanner(ctx, LOGICAL_W, `⚠ ${cat.cause}! stats draining fast`);
       if (!deadRef.current && sleepingNow) drawBanner(ctx, LOGICAL_W, "😴 Sleeping");
+
+      // Food 3-frame throw animation (anchored near pet head; fades out)
+      if (foodAnimRef.current) {
+        const fa = foodAnimRef.current;
+        const elapsed = now - fa.startedAt;
+        if (elapsed >= FEED_ANIM_TOTAL_MS) {
+          // stop anim
+          if (foodAnimRef.current) setFoodAnim(null);
+        } else {
+          const frames = FEED_FRAMES[fa.kind];
+          const frameIdx = Math.min(FEED_FRAMES_COUNT - 1, Math.floor((elapsed / FEED_ANIM_TOTAL_MS) * FEED_FRAMES_COUNT));
+          const src = frames[frameIdx];
+          const img = images[src];
+          const target = petRectRef.current;
+          const baseX = target ? target.x + target.w * 0.4 : LOGICAL_W * 0.48;
+          const baseY = target ? target.y - 12 : 26;
+          if (img) {
+            const w = Math.round(img.width * 0.5);
+            const h = Math.round(img.height * 0.5);
+            ctx.drawImage(img, Math.round(baseX), Math.round(baseY), w, h);
+          } else {
+            // emoji fallback
+            ctx.font = "16px monospace";
+            ctx.fillText(fa.kind === "burger" ? "🍔" : "🎂", Math.round(baseX), Math.round(baseY));
+          }
+        }
+      }
 
       ctx.restore(); // end shifted world
     };
@@ -702,27 +812,62 @@ if (avatarSrc && images[avatarSrc]) {
         rafRef.current = null;
       }
     };
+
+    /** Draws avatar HUD (top-right), respecting AVATAR_SCALE_CAP */
+    function drawAvatarHUD(ctx2: CanvasRenderingContext2D, images2: Record<string, HTMLImageElement>) {
+      const now = Date.now();
+      const sleepingNow = isSleepingAt(now);
+      const avatarAnimKey: AnimKey = (() => {
+        if (deadRef.current) return "idle";
+        if (sleepingNow) return def.sleep?.length ? "sleep" : "idle";
+        if (sickRef.current && (def.sick?.length ?? 0) > 0) return "sick";
+        if (statsRef.current.happiness < 0.35) return (def.sad?.length ? "sad" : def.unhappy?.length ? "unhappy" : "idle") as AnimKey;
+        return def.idle?.length ? "idle" : "walk";
+      })();
+      const avatarFrames = (def[avatarAnimKey] ?? def.idle ?? def.walk ?? []) as string[];
+      const avatarSrc = avatarFrames[0];
+
+      if (avatarSrc && images2[avatarSrc]) {
+        const av = images2[avatarSrc];
+
+        // Scale down only if cap is set and native sprite is larger
+        let aw = av.width, ah = av.height;
+        if (typeof AVATAR_SCALE_CAP === "number") {
+          const nativeMax = Math.max(av.width, av.height);
+          const scale = nativeMax > AVATAR_SCALE_CAP ? (AVATAR_SCALE_CAP / nativeMax) : 1;
+          aw = Math.round(av.width * scale);
+          ah = Math.round(av.height * scale);
+        }
+
+        const padX = 10, padY = 6;
+        const ax = LOGICAL_W - padX - aw;
+        const ay = padY;
+
+        (ctx2 as any).imageSmoothingEnabled = false;
+        ctx2.drawImage(av, ax, ay, aw, ah);
+
+        // HP badge anchored to bottom-right of the avatar
+        const hp = Math.round((statsRef.current.health ?? 0) * 100);
+        const label = `❤️ ${hp}%`;
+        ctx2.font = "10px monospace";
+        ctx2.textBaseline = "alphabetic";
+        const tw = ctx2.measureText(label).width;
+        const tx = ax + aw - tw - 2;
+        const ty = ay + ah - 4;
+        ctx2.lineWidth = 3;
+        ctx2.strokeStyle = "rgba(0,0,0,0.75)";
+        ctx2.strokeText(label, tx, ty);
+        ctx2.fillStyle = "#fff";
+        ctx2.fillText(label, tx, ty);
+      }
+    }
   }
 
-  /** Death overlay */
-  const DeathOverlay = isDead ? (
-    <OverlayCard>
-      <div style={{ fontSize: 18, marginBottom: 6 }}>Your pet has died</div>
-      {deathReason && <div className="muted" style={{ marginBottom: 6 }}>Cause: {deathReason}</div>}
-      <div className="muted" style={{ marginBottom: 12 }}>Lives left: <b>{lives}</b></div>
-      <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
-        {lives > 0 && (
-          <button className="btn btn-primary" onClick={spendLifeToRevive}>
-            Spend 1 life to revive
-          </button>
-        )}
-        <button className="btn" onClick={newGame}>🔄 New Game</button>
-      </div>
-      {lives <= 0 && <div className="muted" style={{ marginTop: 8 }}>Transfer 1 NFT to get a life (or start a New Game).</div>}
-    </OverlayCard>
-  ) : null;
-
   /** UI */
+  const burgerLeft = Math.max(0, FEED_COOLDOWN_MS - (nowMs() - lastBurgerAt));
+  const cakeLeft   = Math.max(0, FEED_COOLDOWN_MS - (nowMs() - lastCakeAt));
+  const healLeft   = Math.max(0, HEAL_COOLDOWN_MS - (nowMs() - lastHealAt));
+
   return (
     <div style={{ width: "min(92vw, 100%)", maxWidth: MAX_W, margin: "0 auto" }}>
       {/* Canvas */}
@@ -735,7 +880,22 @@ if (avatarSrc && images[avatarSrc]) {
         }}
       >
         <canvas ref={canvasRef} style={{ display: "block", imageRendering: "pixelated", background: "transparent", borderRadius: 12 }} />
-        {DeathOverlay}
+        {isDead && (
+          <OverlayCard>
+            <div style={{ fontSize: 18, marginBottom: 6 }}>Your pet has died</div>
+            {deathReason && <div className="muted" style={{ marginBottom: 6 }}>Cause: {deathReason}</div>}
+            <div className="muted" style={{ marginBottom: 12 }}>Lives left: <b>{lives}</b></div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+              {lives > 0 && (
+                <button className="btn btn-primary" onClick={spendLifeToRevive}>
+                  Spend 1 life to revive
+                </button>
+              )}
+              <button className="btn" onClick={newGame}>🔄 New Game</button>
+            </div>
+            {lives <= 0 && <div className="muted" style={{ marginTop: 8 }}>Transfer 1 NFT to get a life (or start a New Game).</div>}
+          </OverlayCard>
+        )}
       </div>
 
       {/* Bars */}
@@ -752,10 +912,17 @@ if (avatarSrc && images[avatarSrc]) {
           opacity: isDead ? 0.5 : 1, pointerEvents: isDead ? ("none" as const) : ("auto" as const),
         }}
       >
-        <button className="btn" onClick={act.feed}>🍗 Feed</button>
+        <button className="btn" onClick={act.feedBurger} disabled={!canBurger}>
+          🍔 Burger{!canBurger ? ` (${(burgerLeft/1000|0)+1}s)` : ""}
+        </button>
+        <button className="btn" onClick={act.feedCake} disabled={!canCake}>
+          🎂 Cake{!canCake ? ` (${(cakeLeft/1000|0)+1}s)` : ""}
+        </button>
         <button className="btn" onClick={act.play}>🎮 Play</button>
-        <button className="btn" onClick={act.heal} disabled={!canHeal}>💊 Heal{!canHeal ? " (cooldown)" : ""}</button>
-        <button className="btn" onClick={act.clean}>🧻 Clean</button>
+        <button className="btn" onClick={act.heal} disabled={!canHeal}>💊 Heal{!canHeal ? ` (${(healLeft/1000|0)+1}s)` : ""}</button>
+        <button className="btn" onClick={act.clean} disabled={!canClean || poops.length === 0}>
+          🧻 Clean{cleaning ? " (running...)" : ""}
+        </button>
         <button className="btn" onClick={() => setAnim((a) => (a === "walk" ? "idle" : "walk"))}>Toggle Walk/Idle</button>
         <button className="btn btn-primary" onClick={() => setForm(forceEvolve(form))}>⭐ Evolve (debug)</button>
         <span className="muted" style={{ alignSelf: "center" }}>
@@ -805,13 +972,16 @@ type AnimKey = "idle" | "walk" | "sick" | "sad" | "unhappy" | "sleep";
 type Stats = { cleanliness: number; hunger: number; happiness: number; health: number };
 type Poop = { x: number; src: string };
 type Catastrophe = { cause: string; until: number };
+type FoodKind = "burger" | "cake";
+type FoodAnim = { kind: FoodKind; startedAt: number };
+type ScoopState = { x: number; active: boolean };
 
 function prettyName(f: FormKey) {
   if (String(f).endsWith("_child")) {
     const base = String(f).replace("_child", "");
     const cap = base === "we" ? "WE" : (base.charAt(0).toUpperCase() + base.slice(1));
     return `${cap} (child)`;
-    }
+  }
   return f;
 }
 
@@ -845,14 +1015,6 @@ function clamp01(x: number) { return Math.max(0, Math.min(1, x)); }
 function clampStats(s: Stats): Stats { return { cleanliness: clamp01(s.cleanliness), hunger: clamp01(s.hunger), happiness: clamp01(s.happiness), health: clamp01(s.health) }; }
 function pickOne<T>(arr: readonly T[]): T { return arr[Math.floor(Math.random() * arr.length)]!; }
 function randInt(min: number, max: number) { return Math.floor(min + Math.random() * (max - min + 1)); }
-function drawBanner(ctx: CanvasRenderingContext2D, width: number, text: string) {
-  const pad = 4; ctx.save(); ctx.font = "12px monospace";
-  const w = Math.ceil(ctx.measureText(text).width) + pad * 2;
-  const x = Math.round((width - w) / 2), y = 18;
-  ctx.fillStyle = "rgba(0,0,0,0.55)"; ctx.fillRect(x, 6, w, 18);
-  ctx.fillStyle = "white"; ctx.fillText(text, x + pad, y);
-  ctx.restore();
-}
 function clampDt(ms: number): number { if (!Number.isFinite(ms) || ms < 0) return 0; return Math.min(ms, 10 * 60 * 1000); }
 async function loadImageSafe(src: string): Promise<{ src: string; img: HTMLImageElement } | null> {
   return new Promise((resolve) => {
@@ -861,78 +1023,31 @@ async function loadImageSafe(src: string): Promise<{ src: string; img: HTMLImage
   });
 }
 
-/** Offline minute-by-minute simulation honoring schedule & sleep */
-function simulateOffline(args: {
-  startWall: number; minutes: number; startAgeMs: number;
-  startStats: Stats; startSick: boolean;
-  sleepCheck: (ts: number) => boolean;
-  schedule: number[]; consumed: number[];
-}): { stats: Stats; sick: boolean; newConsumed: number[] } {
-  let s = { ...args.startStats };
-  let sick = args.startSick;
-  const newly: number[] = [];
+/** Spawns a poop at random X within stage */
+function spawnPoop(setter?: React.Dispatch<React.SetStateAction<Poop[]>>): void;
+function spawnPoop() {
+  // this function is re-bound in component via closure to call setPoops
+}
+function drawBanner(ctx: CanvasRenderingContext2D, width: number, text: string) {
+  const pad = 4; ctx.save(); ctx.font = "12px monospace";
+  const w = Math.ceil(ctx.measureText(text).width) + pad * 2;
+  const x = Math.round((width - w) / 2), y = 18;
+  ctx.fillStyle = "rgba(0,0,0,0.55)"; ctx.fillRect(x, 6, w, 18);
+  ctx.fillStyle = "white"; ctx.fillText(text, x + pad, y);
+  ctx.restore();
+}
 
-  // Minute rates aligned with online sim
-  const hungerPerMinNormal = 1 / 90;
-  const healthPerMinNormal = 1 / (10 * 60);
-  const happyPerMinNormal  = 1 / (12 * 60);
-  const dirtPerMinNormal   = 1 / (12 * 60);
-
-  const healthPerMinSick = 1 / 7;
-  const happyPerMinSick  = 1 / 8;
-
-  const hungerPerMinFast = 1; // catastrophe: hunger drops to zero in ~1 minute
-
-  let ageAtMinuteStart = args.startAgeMs;
-
-  const schedule = [...(args.schedule || [])].sort((a,b)=>a-b);
-  const consumedSet = new Set<number>(args.consumed || []);
-
-  for (let i = 0; i < args.minutes; i++) {
-    const minuteWall = args.startWall + i * 60000;
-    const sleeping = args.sleepCheck(minuteWall);
-
-    ageAtMinuteStart += 60000;
-
-    // scheduled catastrophe if minute hits and not sleeping
-    let catastropheActive = false;
-    for (const t of schedule) {
-      if (consumedSet.has(t)) continue;
-      if (minuteWall >= t && minuteWall < t + CATA_DURATION_MS && !sleeping) {
-        catastropheActive = true;
-        newly.push(t);
-        consumedSet.add(t);
-        break;
-      }
-    }
-
-    if (!sleeping) {
-      const hungerDrop = catastropheActive ? hungerPerMinFast : hungerPerMinNormal;
-      const healthDrop = sick ? healthPerMinSick : healthPerMinNormal;
-      const happyDrop  = sick ? happyPerMinSick  : happyPerMinNormal;
-      const dirtDrop   = dirtPerMinNormal;
-
-      s = clampStats({
-        cleanliness: s.cleanliness - dirtDrop,
-        hunger:      s.hunger      - hungerDrop,
-        happiness:   s.happiness   - happyDrop,
-        health:      s.health      - healthDrop,
-      });
-
-      // Illness roll (minute granularity)
-      if (!sick) {
-        const lowClean = 1 - s.cleanliness;
-        const p = 0.02 + 0.3 * 0.3 + 0.2 * lowClean;
-        if (Math.random() < p * 0.03 * 60) sick = true;
-      } else {
-        if (Math.random() < 0.015 * 60) sick = false;
-      }
-    }
-
-    if (s.hunger <= 0 || s.health <= 0) break; // died offline
-  }
-
-  return { stats: clampStats(s), sick, newConsumed: newly };
+/** Inline closure binds to component's setPoops */
+function spawnPoopImpl(setPoops: React.Dispatch<React.SetStateAction<Poop[]>>) {
+  return function realSpawn() {
+    setPoops((arr) => {
+      const x = 8 + Math.random() * (LOGICAL_W - 16);
+      const src = pickOne(POOP_SRCS);
+      const max = 12;
+      const next = [...arr, { x, src }];
+      return next.slice(-max);
+    });
+  };
 }
 
 /** Small UI atoms */
@@ -956,3 +1071,10 @@ function OverlayCard({ children }: { children: React.ReactNode }) {
     </div>
   );
 }
+
+/** ===== Bind closures that need component state (spawnPoop) ===== */
+function Tamagotchi_bindSpawn(setPoops: React.Dispatch<React.SetStateAction<Poop[]>>) {
+  return spawnPoopImpl(setPoops);
+}
+const _bindSpawnSymbol = Symbol("bindSpawn");
+(Tamagotchi as any)[_bindSpawnSymbol] = Tamagotchi_bindSpawn;
