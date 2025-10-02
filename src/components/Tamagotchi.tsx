@@ -1,6 +1,7 @@
 // src/components/Tamagotchi.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { catalog, type FormKey, type AnimSet as AnyAnimSet } from "../game/catalog";
+const DEAD_FALLBACK = "/sprites/dead.png";
 
 /**
  * Wooligotchi (full build)
@@ -51,8 +52,7 @@ export default function Tamagotchi({
   /** ===== Assets ===== */
   const BG_SRC = "/bg/BG.png";
   const POOP_SRCS = ["/sprites/poop/poop1.png", "/sprites/poop/poop2.png", "/sprites/poop/poop3.png"];
-  const DEAD_FALLBACK = "/sprites/dead.png";
-
+  
   /** ===== Storage keys ===== */
   const LAST_SEEN_KEY = "wg_last_seen_v3";       // last wall time seen
   const AGE_MS_KEY = "wg_age_ms_v4";             // total age (ms)
