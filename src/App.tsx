@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import {
   http,
   createConfig,
@@ -109,13 +109,43 @@ type PetConfig = {
   fps?: number;
   anims: AnimSet;
 };
-
 function makeConfigFromForm(form: FormKey): PetConfig {
-  return {
-    name: "Tamagotchi",
-    fps: 8,
-    anims: catalog[form],
+  return { name: "Tamagotchi", fps: 8, anims: catalog[form] };
+}
+
+/* ===== Evolution logic ===== */
+const FORM_KEY_STORAGE = "wg_form_v1";
+function loadForm(): FormKey {
+  const raw = localStorage.getItem(FORM_KEY_STORAGE);
+  if (raw && (raw as any)) return raw as FormKey;
+  return "egg";
+}
+function saveForm(f: FormKey) {
+  localStorage.setItem(FORM_KEY_STORAGE, f);
+}
+function nextFormRandom(current: FormKey): FormKey {
+  // egg -> egg_adult
+  if (current === "egg") return "egg_adult";
+  // egg_adult -> random char1..char4
+  if (current === "egg_adult") {
+    const pool: FormKey[] = ["char1","char2","char3","char4"];
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    return pick;
+  }
+  // charN -> charN_adult
+  const map: Record<FormKey, FormKey> = {
+    egg: "egg_adult",
+    egg_adult: "char1", // not used here due to branch above
+    char1: "char1_adult",
+    char1_adult: "char1_adult",
+    char2: "char2_adult",
+    char2_adult: "char2_adult",
+    char3: "char3_adult",
+    char3_adult: "char3_adult",
+    char4: "char4_adult",
+    char4_adult: "char4_adult",
   };
+  return map[current] ?? current;
 }
 
 /* ===== Wallet Picker ===== */
@@ -185,8 +215,10 @@ function AppInner() {
   const [pickerOpen, setPickerOpen] = useState(false);
   const lives = useLivesGate(MONAD_CHAIN_ID, address);
 
-  // Active form state (you can wire evolution logic later)
-  const [form, setForm] = useState<FormKey>("egg");
+  // Active form with persistence
+  const [form, setForm] = useState<FormKey>(() => loadForm());
+  useEffect(() => { saveForm(form); }, [form]);
+
   const petConfig = useMemo(() => makeConfigFromForm(form), [form]);
 
   const walletItems = useMemo(
@@ -225,6 +257,13 @@ function AppInner() {
     }
   };
 
+  // Expose evolve action (can be called from the game UI)
+  const evolve = React.useCallback(() => {
+    const next = nextFormRandom(form);
+    setForm(next);
+    return next;
+  }, [form]);
+
   return (
     <div className="page">
       {/* Topbar */}
@@ -262,36 +301,16 @@ function AppInner() {
       ) : lives <= 0 ? (
         <Splash>
           <div className="muted">Send 1 NFT → get 1 life</div>
-          {/* One-button CTA from your VaultPanel */}
           <VaultPanel mode="cta" />
         </Splash>
       ) : (
         <>
-          {/* Simple temporary selector to test forms (remove in production, wire evolution logic) */}
-          <section className="card" style={{marginTop:12}}>
-            <div className="card-title">Form (debug)</div>
-            <select
-              className="input"
-              value={form}
-              onChange={(e)=>setForm(e.target.value as FormKey)}
-              style={{ maxWidth: 280 }}
-            >
-              <option value="egg">Egg (baby)</option>
-              <option value="egg_adult">Egg (adult)</option>
-              <option value="char1">Character 1</option>
-              <option value="char1_adult">Character 1 (adult)</option>
-              <option value="char2">Character 2</option>
-              <option value="char2_adult">Character 2 (adult)</option>
-              <option value="char3">Character 3</option>
-              <option value="char3_adult">Character 3 (adult)</option>
-              <option value="char4">Character 4</option>
-              <option value="char4_adult">Character 4 (adult)</option>
-            </select>
-          </section>
-
           {/* Game */}
           <GameProvider config={petConfig}>
-            <Tamagotchi />
+            <Tamagotchi
+              currentForm={form}
+              onEvolve={evolve}   // game can call to evolve; random branch handled here
+            />
           </GameProvider>
         </>
       )}
