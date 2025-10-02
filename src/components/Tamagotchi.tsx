@@ -1,5 +1,4 @@
 // src/components/Tamagotchi.tsx
-// Full drop-in. Comments are in English only.
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { catalog, type FormKey, type AnimSet as AnyAnimSet } from "../game/catalog";
 
@@ -13,9 +12,17 @@ const NFT_CONTRACT = "0x88c78d5852f45935324c6d100052958f694e8446";
 const AVATAR_SCALE_CAP: number | null = 42;
 const FOOD_FRAME_MAX_PX = 42;
 
-/** World sprite scaling */
-const EGG_SCALE = 0.50;
-const NON_EGG_SCALE = 0.62;
+/** Uniform target world heights (logical px) */
+const EGG_TARGET_H   = 26; // egg
+const CHILD_TARGET_H = 34; // all *_child
+const ADULT_TARGET_H = 42; // adults a bit larger than child
+
+type LifeStage = "egg" | "child" | "adult";
+function getLifeStage(form: FormKey): LifeStage {
+  if (form === "egg") return "egg";
+  if (String(form).endsWith("_child")) return "child";
+  return "adult";
+}
 
 /** Evolution timing */
 const EVOLVE_CHILD_AT = 60_000;             // 1 min
@@ -78,6 +85,10 @@ const SCOOP_CLEAR_RADIUS = 18;
 const SCOOP_HEIGHT_TARGET = 22; // then moved down by EXTRA_DOWN
 const CLEAN_FINISH_CLEANLINESS = 0.95;
 
+/** Catastrophes */
+const CATA_DURATION_MS = 60_000; // 1 minute visually + fast drain
+const CATASTROPHE_CAUSES = ["food poisoning", "mysterious flu", "meteor dust", "bad RNG", "doom day syndrome"] as const;
+
 /** ===== Component ===== */
 export default function Tamagotchi({
   currentForm,
@@ -118,7 +129,7 @@ export default function Tamagotchi({
     return (catalog[nf] ? nf : "egg") as FormKey;
   };
 
-  /** Controlled->uncontrolled handoff (avoid parent overrides) */
+  /** Controlled->uncontrolled handoff */
   const firstSyncDone = useRef(false);
   const [form, setForm] = useState<FormKey>(() => {
     const saved = safeReadJSON<FormKey>(sk(FORM_KEY));
@@ -127,7 +138,6 @@ export default function Tamagotchi({
   });
   useEffect(() => {
     if (!firstSyncDone.current) {
-      // only once on mount; afterward local state owns evolution
       setForm((prev) => (prev ? prev : normalizeForm(currentForm)));
       firstSyncDone.current = true;
     }
@@ -192,7 +202,6 @@ export default function Tamagotchi({
   const foodAnimRef = useLatest(foodAnim);
   const cleaningRef = useLatest(cleaning);
 
-  // last drawn pet rect (not used for food anymore, but kept if needed later)
   const petRectRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
 
   const sleepParamsRef = useRef({ useAutoTime, sleepStart, wakeTime, sleepLocked });
@@ -270,7 +279,7 @@ export default function Tamagotchi({
     return afterStart && beforeWake;
   }
 
-  /** Generate catastrophe schedule */
+  /** Generate catastrophe schedule (with guaranteed first awake minute) */
   useEffect(() => {
     try {
       const schedRaw = localStorage.getItem(sk(CATA_SCHEDULE_KEY));
@@ -278,9 +287,18 @@ export default function Tamagotchi({
       let schedule: number[] = schedRaw ? JSON.parse(schedRaw) : [];
       const consumed: number[] = consumedRaw ? JSON.parse(consumedRaw) : [];
 
-      const firstAt = startTs + 60_000;
+      // First catastrophe: +1 min, but ensure it's during awake time (shift up to 3h forward)
+      let firstAt = startTs + 60_000;
+      if (isSleepingAt(firstAt)) {
+        const maxShiftMins = 180; // 3h
+        for (let i = 1; i <= maxShiftMins; i++) {
+          const t = firstAt + i * 60_000;
+          if (!isSleepingAt(t)) { firstAt = t; break; }
+        }
+      }
       if (!schedule.includes(firstAt)) schedule.push(firstAt);
 
+      // Ensure total 4: 1 immediate-ish + 3 in [day1, day2) while awake
       if (schedule.length < 4) {
         const day1 = startTs + 24 * 3600_000;
         const day2 = startTs + 48 * 3600_000;
@@ -506,7 +524,6 @@ export default function Tamagotchi({
     if (isDead && lives > 0 && !lifeSpentForThisDeath) {
       onLoseLife();
       setLifeSpentForThisDeath(true);
-      // Do not auto-revive; user will start a New Game manually.
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDead]);
@@ -532,7 +549,8 @@ export default function Tamagotchi({
               localStorage.setItem(sk(CATA_CONSUMED_KEY), JSON.stringify([...consumed, t].sort((a,b)=>a-b)));
             }
           } else if (now >= t + CATA_DURATION_MS) {
-            if (!consumed.includes(t)) {
+            // Safety mark only if that window was during awake time
+            if (!consumed.includes(t) && !isSleepingAt(t)) {
               localStorage.setItem(sk(CATA_CONSUMED_KEY), JSON.stringify([...consumed, t].sort((a,b)=>a-b)));
             }
           }
@@ -635,15 +653,6 @@ export default function Tamagotchi({
     let dir: 1 | -1 = 1, x = 40;
     let last = performance.now(), frameTimer = 0;
 
-    // Egg raw height for world autoscale
-    function getEggRawHeight(): number {
-      const eggSet = (catalog as any)["egg"] as AnyAnimSet;
-      const eggSrc = (eggSet?.idle?.[0] ?? eggSet?.walk?.[0]) as string | undefined;
-      const eggImg = eggSrc ? images[eggSrc] : undefined;
-      return eggImg ? eggImg.height : 32;
-    }
-    const eggRawH = getEggRawHeight();
-
     /** Fixed jitter reducer for R→L turn */
     let prevDir: 1 | -1 = dir;
 
@@ -736,9 +745,12 @@ export default function Tamagotchi({
       const rawW = base?.width ?? 32;
       const rawH = base?.height ?? 32;
 
-      // Autoscale in world
-      const factor = (String(formRef.current) === "egg") ? EGG_SCALE : NON_EGG_SCALE;
-      const scale = (eggRawH / Math.max(1, rawH)) * factor;
+      // Uniform scale per stage
+      const stage = getLifeStage(formRef.current);
+      const targetH =
+        stage === "egg"   ? EGG_TARGET_H   :
+        stage === "child" ? CHILD_TARGET_H : ADULT_TARGET_H;
+      const scale = targetH / Math.max(1, rawH);
       const drawW = Math.round(rawW * scale), drawH = Math.round(rawH * scale);
 
       // Movement
@@ -859,7 +871,7 @@ export default function Tamagotchi({
         (ctx2 as any).imageSmoothingEnabled = false;
         ctx2.drawImage(av, ax, ay, aw, ah);
 
-        // Keep HP badge only
+        // HP badge
         const hp = Math.round((statsRef.current.health ?? 0) * 100);
         const label = `❤️ ${hp}%`;
         ctx2.font = "10px monospace";
@@ -907,7 +919,7 @@ export default function Tamagotchi({
           <OverlayCard>
             <div style={{ fontSize: 18, marginBottom: 6 }}>Your pet has died</div>
             {deathReason && <div className="muted" style={{ marginBottom: 10 }}>Cause: {deathReason}</div>}
-            {/* No "Spend 1 life" UI — we auto-spend on death if lives>0 */}
+            {/* No "Spend 1 life" UI — auto-spend if lives>0 */}
             <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
               <button className="btn" onClick={newGame}>🔄 New Game</button>
             </div>
