@@ -1,13 +1,14 @@
 import React, { useMemo } from "react";
 import { useAccount } from "wagmi";
 import Sprite from "./Sprite";
+import PixelViewport from "./PixelViewport";
 import { useGame, useReviveWithLife } from "../game/useGame";
 
 const MONAD_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 
-/** Tamagotchi scene composed of:
+/** Tamagotchi scene:
  *  - .avatar (purple frame): static portrait/sprite
- *  - .stage  (red frame): background area for walk cycles
+ *  - .stage  (red frame): PixelViewport 320×180 (upscales with integer factor)
  *  - .hud    (yellow frame): actions and status bars
  */
 export default function Tamagotchi() {
@@ -48,15 +49,37 @@ export default function Tamagotchi() {
           <Sprite frames={config.anims.idle} fps={config.fps ?? 8} loop />
         </div>
 
-        {/* Stage (red) — place walking/background here later */}
+        {/* Stage (red): fixed logical 320×180, integer upscaling, no blur */}
         <div className="stage">
-          {/* Placeholder for future walking animation */}
-          <div style={{
-            position:"absolute", inset:0, display:"grid", placeItems:"center",
-            color:"#a3a7be", fontSize:12
-          }}>
-            Stage / background (character will walk here)
-          </div>
+          <PixelViewport width={320} height={180} className="stage-viewport">
+            {/* This is the logical 320×180 plane. Use absolute coords in this space. */}
+            {/* Example background grid (remove later): */}
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                background:
+                  "linear-gradient(#10162b 1px, transparent 1px) 0 0 / 16px 16px, linear-gradient(90deg,#10162b 1px, transparent 1px) 0 0 / 16px 16px, #0e1426",
+              }}
+            />
+            {/* Example character placeholder at x=20,y=100: */}
+            <div
+              style={{
+                position: "absolute",
+                left: 20,
+                top: 100,
+                width: 32,
+                height: 32,
+                imageRendering: "pixelated",
+              }}
+            >
+              <img
+                src={config.anims.idle[0]}
+                alt=""
+                style={{ width: "100%", height: "100%", imageRendering: "pixelated" }}
+              />
+            </div>
+          </PixelViewport>
         </div>
 
         {/* HUD (yellow) */}
