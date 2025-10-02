@@ -21,7 +21,7 @@ export default function Tamagotchi({
     egg: 0.66,          // downscale big egg sprites
   };
   const BASELINE_NUDGE: Partial<Record<FormKey, number>> = {
-    egg: +18,            // push slightly down so it "sits" on ground
+    egg: +24,            // push slightly down so it "sits" on ground
   };
 
   const wrapRef = useRef<HTMLDivElement | null>(null);
