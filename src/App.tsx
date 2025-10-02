@@ -72,16 +72,9 @@ const config = createConfig({
   ssr: false,
 });
 
-/* ===== Helpers ===== */
-function short(addr?: `0x${string}`) {
-  if (!addr) return "";
-  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
-}
-
-/* ===== Lives gate (1 NFT = 1 life) ===== */
+/* ===== Lives (1 NFT = 1 life) ===== */
 const LIVES_KEY = "wg_lives_v1";
 const lKey = (cid:number, addr:string)=>`${cid}:${addr.toLowerCase()}`;
-
 function getLivesLocal(cid:number, addr?:`0x${string}`|null){
   if (!addr) return 0;
   try {
@@ -90,7 +83,6 @@ function getLivesLocal(cid:number, addr?:`0x${string}`|null){
     return map[lKey(cid, addr)] ?? 0;
   } catch { return 0; }
 }
-
 function useLivesGate(chainId:number, address?:`0x${string}`|null){
   const [lives, setLives] = React.useState(0);
   React.useEffect(()=>{
@@ -105,8 +97,6 @@ function useLivesGate(chainId:number, address?:`0x${string}`|null){
   }, [chainId, address]);
   return lives;
 }
-
-// Spend exactly one life for current address+chain and notify listeners
 function spendOneLife(chainId:number, address?:`0x${string}`|null) {
   if (!address) return;
   try {
@@ -119,69 +109,61 @@ function spendOneLife(chainId:number, address?:`0x${string}`|null) {
       localStorage.setItem(LIVES_KEY, JSON.stringify(map));
       window.dispatchEvent(new Event("wg:lives-changed"));
     }
-  } catch (e) {
-    console.error("spendOneLife failed", e);
-  }
+  } catch (e) { console.error("spendOneLife failed", e); }
 }
 
-/* ===== PetConfig adapter ===== */
-type PetConfig = {
-  name: string;
-  fps?: number;
-  anims: AnimSet;
-};
+/* ===== PetConfig ===== */
+type PetConfig = { name: string; fps?: number; anims: AnimSet; };
 function makeConfigFromForm(form: FormKey): PetConfig {
   return { name: "Tamagotchi", fps: 8, anims: catalog[form] };
 }
 
-/* ===== Evolution logic (random after egg_adult) ===== */
+/* ===== Evolution (timed) ===== */
 const FORM_KEY_STORAGE = "wg_form_v1";
+const FORM_TS_KEY = "wg_form_ts_v1";        // when current form was entered
+const FIRST_CHAR_TS_KEY = "wg_first_char_ts_v1"; // when first became any charN
+
 function loadForm(): FormKey {
   const raw = localStorage.getItem(FORM_KEY_STORAGE);
-  if (raw && (raw as any)) return raw as FormKey;
-  return "egg";
+  return (raw as FormKey) || "egg";
 }
 function saveForm(f: FormKey) {
   localStorage.setItem(FORM_KEY_STORAGE, f);
+  localStorage.setItem(FORM_TS_KEY, String(Date.now()));
+  if (f.startsWith("char") && !localStorage.getItem(FIRST_CHAR_TS_KEY)) {
+    localStorage.setItem(FIRST_CHAR_TS_KEY, String(Date.now()));
+  }
 }
-function nextFormRandom(current: FormKey): FormKey {
-  // egg -> egg_adult
-  if (current === "egg") return "egg_adult";
-  // egg_adult -> random char1..char4
-  if (current === "egg_adult") {
+function nextFormRandomAfterTimers(current: FormKey): FormKey | null {
+  const now = Date.now();
+  const enteredTs = Number(localStorage.getItem(FORM_TS_KEY) || now);
+  const since = now - enteredTs;
+
+  // egg -> egg_adult after 5 minutes
+  if (current === "egg" && since >= 5 * 60 * 1000) return "egg_adult";
+
+  // egg_adult -> random char1..char4 after 8 hours
+  if (current === "egg_adult" && since >= 8 * 60 * 60 * 1000) {
     const pool: FormKey[] = ["char1","char2","char3","char4"];
     const pick = pool[Math.floor(Math.random() * pool.length)];
     return pick;
   }
-  // charN -> charN_adult
-  const map: Record<FormKey, FormKey> = {
-    egg: "egg_adult",
-    egg_adult: "char1", // not used because of branch above
-    char1: "char1_adult",
-    char1_adult: "char1_adult",
-    char2: "char2_adult",
-    char2_adult: "char2_adult",
-    char3: "char3_adult",
-    char3_adult: "char3_adult",
-    char4: "char4_adult",
-    char4_adult: "char4_adult",
-  };
-  return map[current] ?? current;
+
+  // charN -> charN_adult after 2 days from FIRST_CHAR_TS (first char stage)
+  if (/^char[1-4]$/.test(current)) {
+    const firstCharTs = Number(localStorage.getItem(FIRST_CHAR_TS_KEY) || now);
+    if (now - firstCharTs >= 2 * 24 * 60 * 60 * 1000) {
+      return (current + "_adult") as FormKey;
+    }
+  }
+
+  return null;
 }
 
-/* ===== Wallet Picker ===== */
-function WalletPicker({
-  open,
-  onClose,
-  onPick,
-  items,
-  pending,
-}: {
-  open: boolean;
-  onClose: () => void;
-  onPick: (id: string) => void;
-  items: { id: string; label: string }[];
-  pending: boolean;
+/* ===== Wallet Picker / Splash (unchanged) ===== */
+function WalletPicker({ open, onClose, onPick, items, pending }: {
+  open: boolean; onClose: () => void; onPick: (id: string) => void;
+  items: { id: string; label: string }[]; pending: boolean;
 }) {
   if (!open) return null;
   return (
@@ -190,20 +172,12 @@ function WalletPicker({
         <div className="title" style={{ fontSize: 20, marginBottom: 10, color: "white" }}>Connect a wallet</div>
         <div className="wallet-grid">
           {items.map((i) => (
-            <button
-              key={i.id}
-              onClick={() => onPick(i.id)}
-              disabled={pending}
-              className="btn btn-ghost"
-              style={{ width: "100%" }}
-            >
+            <button key={i.id} onClick={() => onPick(i.id)} disabled={pending} className="btn btn-ghost" style={{ width: "100%" }}>
               {i.label}
             </button>
           ))}
         </div>
-        <div className="helper" style={{ marginTop: 10 }}>
-          WalletConnect opens a QR for mobile wallets (Phantom, Rainbow, OKX, etc.).
-        </div>
+        <div className="helper" style={{ marginTop: 10 }}>WalletConnect opens a QR for mobile wallets (Phantom, Rainbow, OKX, etc.).</div>
         <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
           <button onClick={onClose} className="btn">Close</button>
         </div>
@@ -211,8 +185,6 @@ function WalletPicker({
     </div>
   );
 }
-
-/* ===== Splash ===== */
 function Splash({ children }: { children?: React.ReactNode }) {
   return (
     <section className="card splash">
@@ -236,18 +208,36 @@ function AppInner() {
   const [pickerOpen, setPickerOpen] = useState(false);
   const lives = useLivesGate(MONAD_CHAIN_ID, address);
 
-  // Active form with persistence
-  const [form, setForm] = useState<FormKey>(() => loadForm());
+  // Active form with persistence + time stamps
+  const [form, setForm] = useState<FormKey>(() => {
+    const f = loadForm();
+    if (!localStorage.getItem(FORM_TS_KEY)) {
+      localStorage.setItem(FORM_TS_KEY, String(Date.now()));
+      if (f.startsWith("char") && !localStorage.getItem(FIRST_CHAR_TS_KEY))
+        localStorage.setItem(FIRST_CHAR_TS_KEY, String(Date.now()));
+    }
+    return f;
+  });
   useEffect(() => { saveForm(form); }, [form]);
+
+  // Check timers every minute
+  useEffect(() => {
+    const check = () => {
+      const next = nextFormRandomAfterTimers(form);
+      if (next && next !== form) setForm(next);
+    };
+    check(); // run once at mount
+    const id = setInterval(check, 60 * 1000);
+    return () => clearInterval(id);
+  }, [form]);
 
   const petConfig = useMemo(() => makeConfigFromForm(form), [form]);
 
   const walletItems = useMemo(
-    () =>
-      connectors.map((c) => ({
-        id: c.id,
-        label: c.name === "Injected" ? "Browser wallet (MetaMask / Phantom / OKX …)" : c.name,
-      })),
+    () => connectors.map((c) => ({
+      id: c.id,
+      label: c.name === "Injected" ? "Browser wallet (MetaMask / Phantom / OKX …)" : c.name,
+    })),
     [connectors]
   );
 
@@ -278,11 +268,11 @@ function AppInner() {
     }
   };
 
-  // Evolve flow from game UI
+  // Optional: manual evolve trigger (kept for debug)
   const evolve = React.useCallback(() => {
-    const next = nextFormRandom(form);
-    setForm(next);
-    return next;
+    const next = nextFormRandomAfterTimers(form);
+    if (next) setForm(next);
+    return next ?? form;
   }, [form]);
 
   return (
@@ -293,7 +283,6 @@ function AppInner() {
           <div className="logo">🐣</div>
           <div className="title">Wooligotchi</div>
         </div>
-
         {!isConnected ? (
           <button className="btn btn-primary" onClick={() => setPickerOpen(true)}>
             Connect Wallet
@@ -313,7 +302,7 @@ function AppInner() {
         )}
       </header>
 
-      {/* Start / gate */}
+      {/* Gate */}
       {!isConnected ? (
         <Splash>
           <div style={{ display:"flex", justifyContent:"center", gap:12, marginTop:10 }}>
