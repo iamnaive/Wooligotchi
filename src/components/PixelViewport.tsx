@@ -4,16 +4,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
  * PixelViewport
  * Logical scene has fixed resolution (w × h). We upscale it by an integer factor
  * to fit available space, with nearest-neighbor (no blur).
- *
- * Props:
- *  - width, height: logical resolution (e.g. 320x180)
- *  - className: optional class for outer wrapper
- *  - children: render your scene inside the logical canvas (absolute coords etc.)
- *
- * How it works:
- *  1) Measure available size of the container with ResizeObserver.
- *  2) Compute integer scale = floor(min(availW/w, availH/h)), min 1.
- *  3) Render inner <div> sized w×h and scale it by CSS transform + pixelated.
  */
 export default function PixelViewport({
   width,
@@ -48,7 +38,6 @@ export default function PixelViewport({
     return Math.max(1, s);
   }, [avail, width, height]);
 
-  // size we actually occupy
   const scaledW = width * scale;
   const scaledH = height * scale;
 
@@ -69,11 +58,9 @@ export default function PixelViewport({
         style={{
           width: scaledW,
           height: scaledH,
-          // inner logical plane (fixed 320x180) + integer scale
           transform: `scale(${scale})`,
           transformOrigin: "top left",
           imageRendering: "pixelated",
-          // place the logical plane at 0,0 so children can use absolute coords
           position: "relative",
         }}
       >
