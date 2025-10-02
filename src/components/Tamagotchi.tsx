@@ -6,16 +6,16 @@ import StageWalker from "./StageWalker";
 import { useGame, useReviveWithLife } from "../game/useGame";
 import { STAGE_BG } from "../game/catalog";
 
-/** Tamagotchi scene:
- *  - .avatar (purple frame): portrait/loop
- *  - .stage  (red frame): PixelViewport 320×180, background image, walking actor
- *  - .hud    (yellow frame): actions and status bars
- *
- *  All text/comments in English as requested.
- */
-export default function Tamagotchi() {
+/** Props allow App to control evolution branching and persistence */
+export default function Tamagotchi({
+  currentForm,
+  onEvolve,
+}: {
+  currentForm: string;
+  onEvolve?: () => string; // returns new form
+}) {
   const { address } = useAccount();
-  const { state, dispatch, config } = useGame(); // config.anims = active form's anim set
+  const { state, dispatch, config } = useGame();
   const { can, revive } = useReviveWithLife(Number(import.meta.env.VITE_CHAIN_ID ?? 10143), address);
 
   const frames = useMemo(() => {
@@ -51,10 +51,9 @@ export default function Tamagotchi() {
           <Sprite frames={config.anims.avatar ?? config.anims.idle} fps={config.fps ?? 8} loop />
         </div>
 
-        {/* Stage (red): fixed logical 320×180 with background and walking actor */}
+        {/* Stage (red): 320×180, background + walking actor */}
         <div className="stage">
           <PixelViewport width={320} height={180} className="stage-viewport">
-            {/* Background image fills logical scene (no blur via nearest-neighbor scale outside) */}
             <img
               src={STAGE_BG}
               alt=""
@@ -68,7 +67,6 @@ export default function Tamagotchi() {
               }}
             />
 
-            {/* Walking actor (egg or current form if walk is provided) */}
             <StageWalker
               frames={config.anims.walk ?? config.anims.idle}
               spriteW={32}
@@ -105,6 +103,20 @@ export default function Tamagotchi() {
               </button>
               <button className="btn" onClick={() => dispatch({ type: "DO", do: "clean" })}>🧼 Clean</button>
               <button className="btn" onClick={() => dispatch({ type: "DO", do: "heal" })}>💊 Heal</button>
+
+              {/* Temporary debug: force evolution to next stage (random branching is in App) */}
+              {onEvolve && (
+                <button
+                  className="btn btn-primary"
+                  onClick={() => {
+                    const nf = onEvolve();
+                    console.log("Evolved to:", nf);
+                  }}
+                >
+                  ⭐ Evolve (debug)
+                </button>
+              )}
+              <span className="pill">Form: {currentForm}</span>
             </div>
           ) : (
             <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
