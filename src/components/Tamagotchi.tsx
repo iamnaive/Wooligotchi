@@ -5,19 +5,15 @@ import { catalog, type FormKey, type AnimSet as AnyAnimSet } from "../game/catal
 /** ===== Visual & behavior constants ===== */
 const DEAD_FALLBACK = "/sprites/dead.png";
 
-/** Avatar scaling in HUD (top-right):
- * - If AVATAR_SCALE_CAP is a number, avatar is only scaled DOWN to fit the cap.
- * - If AVATAR_SCALE_CAP is null, avatar is never scaled (original pixel size).
+/** HUD avatar scale:
+ * - If number -> avatar scales DOWN to fit this max size (px, logical). Never scales up.
+ * - If null -> avatar is never scaled at all.
  */
-const AVATAR_SCALE_CAP: number | null = null; // no autoscale per user request
+const AVATAR_SCALE_CAP: number | null = 42; // keep pixels crisp, only shrink if too big
 
-/** World sprite scaling (stage, not HUD):
- * - EGG_SCALE shrinks the egg sprite.
- * - NON_EGG_SCALE shrinks non-egg forms relative to egg raw height (keeps a consistent world size).
- */
+/** World sprite scaling (stage, not HUD) */
 const EGG_SCALE = 0.50;     // smaller egg in the world
 const NON_EGG_SCALE = 0.62; // tuned to keep parity vs egg target height
-const INVERT_WALK_FACING = false;
 
 /** Evolution timing */
 const EVOLVE_CHILD_AT = 60_000;             // egg -> child after 1 minute total age
@@ -27,21 +23,13 @@ const EVOLVE_ADULT_AT = 2 * 24 * 3600_000;  // child -> adult after 2 days total
 const BG_SRC = "/bg/BG.png";
 const POOP_SRCS = ["/sprites/poop/poop1.png", "/sprites/poop/poop2.png", "/sprites/poop/poop3.png"];
 
-/** Food throw (3-frame) animation assets.
- * Drop your files here (any size). Fallbacks (emoji) are used if missing.
- * Folder suggestions:
- *   /public/sprites/ui/food/burger/000.png,001.png,002.png
- *   /public/sprites/ui/food/cake/000.png,001.png,002.png
- */
+/** Food (3-frame) animation assets */
 const FEED_FRAMES = {
   burger: ["/sprites/ui/food/burger/000.png", "/sprites/ui/food/burger/001.png", "/sprites/ui/food/burger/002.png"],
   cake:   ["/sprites/ui/food/cake/000.png",   "/sprites/ui/food/cake/001.png",   "/sprites/ui/food/cake/002.png"],
 } as const;
 
-/** Scoop (cleaning) sprite.
- * Put image to: /public/sprites/ui/scoop.png
- * Any aspect ratio is fine; will be autoscaled to reasonable height.
- */
+/** Scoop (cleaning) sprite */
 const SCOOP_SRC = "/sprites/ui/scoop.png";
 
 /** Storage keys */
@@ -54,33 +42,33 @@ const SLEEP_LOCK_KEY = "wg_sleep_lock_v1";
 const SLEEP_FROM_KEY = "wg_sleep_from_v1";
 const SLEEP_TO_KEY = "wg_sleep_to_v1";
 
-/** Catastrophes schedule (absolute UTC ms) */
+/** Catastrophes */
 const CATA_SCHEDULE_KEY = "wg_cata_schedule_v2";
 const CATA_CONSUMED_KEY = "wg_cata_consumed_v2";
-const CATA_DURATION_MS = 60_000; // 1 minute visually + fast drain
+const CATA_DURATION_MS = 60_000;
 const CATASTROPHE_CAUSES = ["food poisoning", "mysterious flu", "meteor dust", "bad RNG", "doom day syndrome"] as const;
 
-/** Game field layout constants */
+/** Stage layout */
 const LOGICAL_W = 320, LOGICAL_H = 180;
 const FPS = 6, WALK_SPEED = 42;
 const MAX_W = 720, CANVAS_H = 360;
 const BAR_H = 6, BASE_GROUND = 48, Y_SHIFT = 26;
 const HEAL_COOLDOWN_MS = 60_000;
 
-/** Food logic constants */
-const FEED_COOLDOWN_MS = 5_000;   // per button
-const FEED_ANIM_TOTAL_MS = 600;   // total duration for 3 frames
-const FEED_FRAMES_COUNT = 3;      // exactly 3 frames
+/** Food logic */
+const FEED_COOLDOWN_MS = 5_000;
+const FEED_ANIM_TOTAL_MS = 600;   // 3 frames over 0.6s
+const FEED_FRAMES_COUNT = 3;
 const FEED_EFFECTS = {
   burger: { hunger: +0.28, happiness: +0.06 },
   cake:   { hunger: +0.22, happiness: +0.12 },
 };
 
-/** Cleaning (scoop) constants */
-const SCOOP_SPEED_PX_S = 160;        // horizontal speed
-const SCOOP_CLEAR_RADIUS = 18;       // distance to poop center to clear
-const SCOOP_HEIGHT_TARGET = 22;      // target drawn height in logical px
-const CLEAN_FINISH_CLEANLINESS = 0.95; // clamp up to this on finish
+/** Cleaning (scoop) */
+const SCOOP_SPEED_PX_S = 160;
+const SCOOP_CLEAR_RADIUS = 18;
+const SCOOP_HEIGHT_TARGET = 22;
+const CLEAN_FINISH_CLEANLINESS = 0.95;
 
 export default function Tamagotchi({
   currentForm,
@@ -102,7 +90,7 @@ export default function Tamagotchi({
     we_child: "WE",
   };
 
-  /** Normalize any legacy names */
+  /** Normalize legacy names */
   const normalizeForm = (f: string): FormKey => {
     const map: Record<string, FormKey> = {
       char1: "chog_child",       char1_adult: "Chog",
@@ -114,9 +102,7 @@ export default function Tamagotchi({
     return (catalog[nf] ? nf : "egg") as FormKey;
   };
 
-  /** Controlled->uncontrolled handoff:
-   * We only sync currentForm ONCE on mount to avoid parent re-overriding our evolution (was causing "always Chog").
-   */
+  /** Controlled->uncontrolled handoff (avoid parent overrides) */
   const firstSyncDone = useRef(false);
   const [form, setForm] = useState<FormKey>(() => normalizeForm(currentForm));
   useEffect(() => {
@@ -136,12 +122,12 @@ export default function Tamagotchi({
   const [deathReason, setDeathReason] = useState<string | null>(null);
   const [lastHealAt, setLastHealAt] = useState<number>(0);
 
-  /** Food cooldowns & animation state */
+  /** Food cooldowns & animation */
   const [lastBurgerAt, setLastBurgerAt] = useState<number>(0);
   const [lastCakeAt, setLastCakeAt] = useState<number>(0);
   const [foodAnim, setFoodAnim] = useState<FoodAnim | null>(null);
 
-  /** Cleaning (scoop) animation state */
+  /** Cleaning (scoop) */
   const [cleaning, setCleaning] = useState<ScoopState | null>(null);
 
   /** Sleep window */
@@ -150,13 +136,13 @@ export default function Tamagotchi({
   const [wakeTime, setWakeTime] = useState<string>(() => localStorage.getItem(SLEEP_TO_KEY) || "08:30");
   const [sleepLocked, setSleepLocked] = useState<boolean>(() => !!localStorage.getItem(SLEEP_LOCK_KEY));
 
-  /** Age (monotonic total age in ms) */
+  /** Age */
   const [ageMs, setAgeMs] = useState<number>(() => {
     const v = Number(localStorage.getItem(AGE_MS_KEY) || 0);
     return Number.isFinite(v) && v >= 0 ? v : 0;
   });
 
-  /** Current catastrophe window */
+  /** Catastrophe window */
   const [catastrophe, setCatastrophe] = useState<Catastrophe | null>(null);
 
   /** Stable refs */
@@ -171,7 +157,7 @@ export default function Tamagotchi({
   const foodAnimRef = useLatest(foodAnim);
   const cleaningRef = useLatest(cleaning);
 
-  // last drawn pet rect, used to anchor food animation near the pet's head
+  // last drawn pet rect for anchoring food frames near head
   const petRectRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
 
   const sleepParamsRef = useRef({ useAutoTime, sleepStart, wakeTime, sleepLocked });
@@ -180,7 +166,7 @@ export default function Tamagotchi({
   /** Canvas & RAF */
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const rafRef = useRef<number | null>(null); // single RAF guard
+  const rafRef = useRef<number | null>(null);
 
   /** Catalog / frames */
   const safeForm = (f: FormKey) => (catalog[f] ? f : ("egg" as FormKey));
@@ -192,12 +178,9 @@ export default function Tamagotchi({
     set.add(BG_SRC);
     (["idle","walk","sick","sad","unhappy","sleep"] as AnimKey[]).forEach(k => (def[k] ?? []).forEach(u => set.add(u)));
     POOP_SRCS.forEach(u => set.add(u));
-    // food anim frames
     FEED_FRAMES.burger.forEach(u => set.add(u));
     FEED_FRAMES.cake.forEach(u => set.add(u));
-    // scoop
     set.add(SCOOP_SRC);
-    // dead candidates and egg frames (for autoscale reference)
     deadCandidates(form).forEach(u => set.add(u));
     const egg = catalog["egg"] || {};
     (egg.idle ?? egg.walk ?? []).forEach(u => set.add(u));
@@ -245,7 +228,7 @@ export default function Tamagotchi({
       const firstAt = startTs + 60_000;
       if (!schedule.includes(firstAt)) schedule.push(firstAt);
 
-      // Ensure 4 total: 1 immediate + 3 in [day1, day2) during awake time
+      // Ensure 4 total (1 immediate + 3 day1..day2 while awake)
       if (schedule.length < 4) {
         const day1 = startTs + 24 * 3600_000;
         const day2 = startTs + 48 * 3600_000;
@@ -269,7 +252,7 @@ export default function Tamagotchi({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startTs]);
 
-  /** Offline catch-up (age/stats/illness/catastrophes) + anti-rewind */
+  /** Offline catch-up + anti-rewind */
   useEffect(() => {
     try {
       const nowWall = Date.now();
@@ -311,7 +294,7 @@ export default function Tamagotchi({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** Online age ticker (monotonic, perf-based) */
+  /** Monotonic age ticker (perf-based) */
   useEffect(() => {
     let lastPerf = performance.now();
     const id = window.setInterval(() => {
@@ -352,14 +335,12 @@ export default function Tamagotchi({
 
   /** Evolution (equal probability from egg) */
   useEffect(() => {
-    // egg -> random child
     if (formRef.current === "egg" && ageRef.current >= EVOLVE_CHILD_AT) {
       const next = pickOne(CHILD_CHOICES);
       const maybe = onEvolve?.(next);
       setForm(normalizeForm((maybe || next) as FormKey));
       return;
     }
-    // child -> mapped adult
     if (String(formRef.current).endsWith("_child") && ageRef.current >= EVOLVE_ADULT_AT) {
       const adult = ADULT_MAP[String(formRef.current)];
       if (adult) {
@@ -370,7 +351,7 @@ export default function Tamagotchi({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ageMs, form]);
 
-  /** Poops load/save */
+  /** Load/save poops */
   useEffect(() => {
     try {
       const raw = localStorage.getItem(POOPS_KEY);
@@ -384,24 +365,31 @@ export default function Tamagotchi({
     try { localStorage.setItem(POOPS_KEY, JSON.stringify(poops.slice(-12))); } catch {}
   }, [poops]);
 
-  /** ===== Actions (with cooldowns / animations) ===== */
+  /** ===== Actions ===== */
   const nowMs = () => Date.now();
-  const canHeal = !isDead && nowMs() - lastHealAt >= HEAL_COOLDOWN_MS;
+  const canHeal   = !isDead && nowMs() - lastHealAt   >= HEAL_COOLDOWN_MS;
   const canBurger = !isDead && nowMs() - lastBurgerAt >= FEED_COOLDOWN_MS;
   const canCake   = !isDead && nowMs() - lastCakeAt   >= FEED_COOLDOWN_MS;
-  const canClean  = !isDead && !cleaningRef.current; // disabled during scoop pass
+  const canClean  = !isDead && !cleaningRef.current;
+
+  function spawnPoop() {
+    setPoops((arr) => {
+      const x = 8 + Math.random() * (LOGICAL_W - 16);
+      const src = pickOne(POOP_SRCS);
+      const max = 12;
+      const next = [...arr, { x, src }];
+      return next.slice(-max);
+    });
+  }
 
   const act = {
     feedBurger: () => {
       if (!canBurger) return;
-      // stats effect
       setStats((s) => clampStats({ ...s,
         hunger: s.hunger + FEED_EFFECTS.burger.hunger,
         happiness: s.happiness + FEED_EFFECTS.burger.happiness
       }));
-      // poop chance
       if (Math.random() < 0.7) spawnPoop();
-      // start 3-frame anim anchored near pet
       setFoodAnim({ kind: "burger", startedAt: nowMs() });
       setLastBurgerAt(nowMs());
     },
@@ -421,8 +409,7 @@ export default function Tamagotchi({
     },
     clean: () => {
       if (!canClean) return;
-      // start scoop pass from right to left
-      const startX = LOGICAL_W + 10;
+      const startX = LOGICAL_W + 10; // enter from right
       setCleaning({ x: startX, active: true });
     },
     heal: () => {
@@ -433,7 +420,7 @@ export default function Tamagotchi({
     },
   };
 
-  /** Spend life to revive (keeps progress) */
+  /** Revive (spend life) */
   const spendLifeToRevive = () => {
     if (lives <= 0) return;
     onLoseLife();
@@ -452,13 +439,10 @@ export default function Tamagotchi({
     setCatastrophe(null);
   };
 
-  /** New Game: full reset back to the very first egg (allowed only after death) */
+  /** New Game: full reset to first egg (only after death) */
   const newGame = () => {
-    // Safety: only allow New Game after death to avoid accidental wipes
     if (!deadRef.current) return;
-
     try {
-      // Hard wipe all progression-related state
       localStorage.removeItem(START_TS_KEY);
       localStorage.removeItem(LAST_SEEN_KEY);
       localStorage.removeItem(AGE_MS_KEY);
@@ -466,10 +450,7 @@ export default function Tamagotchi({
       localStorage.removeItem(POOPS_KEY);
       localStorage.removeItem(CATA_SCHEDULE_KEY);
       localStorage.removeItem(CATA_CONSUMED_KEY);
-      // NOTE: We intentionally keep user's sleep preferences (SLEEP_* keys)
     } catch {}
-
-    // Reset in-memory state to the very beginning
     setForm("egg");
     setStats({ cleanliness: 0.9, hunger: 0.65, happiness: 0.6, health: 1.0 });
     setPoops([]);
@@ -480,8 +461,6 @@ export default function Tamagotchi({
     setAgeMs(0);
     setFoodAnim(null);
     setCleaning(null);
-
-    // Re-seed fresh start timestamps so anti-rewind keeps working
     const now = Date.now();
     try {
       localStorage.setItem(START_TS_KEY, String(now));
@@ -490,7 +469,7 @@ export default function Tamagotchi({
     } catch {}
   };
 
-  /** ===== Periodic drains / illness / events ===== */
+  /** Drains / events / illness loop */
   useEffect(() => {
     let lastWall = Date.now();
     const id = window.setInterval(() => {
@@ -499,7 +478,7 @@ export default function Tamagotchi({
       lastWall = now;
       if (deadRef.current) return;
 
-      // trigger scheduled catastrophes when window hits (if awake)
+      // schedule trigger
       try {
         const schedule: number[] = JSON.parse(localStorage.getItem(CATA_SCHEDULE_KEY) || "[]");
         const consumed: number[] = JSON.parse(localStorage.getItem(CATA_CONSUMED_KEY) || "[]");
@@ -558,7 +537,7 @@ export default function Tamagotchi({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** ===== Render loop (single per-instance RAF) ===== */
+  /** ===== Render loop (single RAF) ===== */
   useEffect(() => {
     let alive = true;
     const urlsFull = Array.from(new Set([...urls, BG_SRC]));
@@ -643,7 +622,7 @@ export default function Tamagotchi({
         ctx.drawImage(bg, dx, dy, dw, dh);
       }
 
-      // --- HUD Avatar (top-right), no autoscale unless larger than cap ---
+      // --- HUD Avatar (top-right) ---
       drawAvatarHUD(ctx, images);
 
       // World layer (shifted down)
@@ -673,7 +652,7 @@ export default function Tamagotchi({
         return animRef.current;
       })();
 
-      // Frames with smart fallback to walk if needed
+      // Frames with fallback
       let framesAll = (def[chosenAnim] ?? def.idle ?? def.walk ?? []) as string[];
       framesAll = framesAll.filter(Boolean);
       if (!sleepingNow && framesAll.length < 2 && (def.walk?.length ?? 0) >= 2) framesAll = def.walk!;
@@ -683,7 +662,7 @@ export default function Tamagotchi({
       const rawW = base?.width ?? 32;
       const rawH = base?.height ?? 32;
 
-      // Autoscale in world: egg by EGG_SCALE, non-egg by NON_EGG_SCALE relative to egg height
+      // Autoscale in world
       const factor = (String(formRef.current) === "egg") ? EGG_SCALE : NON_EGG_SCALE;
       const scale = (eggRawH / Math.max(1, rawH)) * factor;
       const drawW = Math.round(rawW * scale), drawH = Math.round(rawH * scale);
@@ -696,7 +675,7 @@ export default function Tamagotchi({
         else if (x > maxX) { x = maxX; dir = -1; }
       }
 
-      // Frame switching (single loop — prevents stacked/overlapping walk)
+      // Frame switching
       frameTimer += dt;
       if (frameTimer > 1e6) frameTimer %= 1e6;
       let frameIndex = 0;
@@ -720,9 +699,8 @@ export default function Tamagotchi({
         }
       } else if (frames.length) {
         ctx.save();
-        let flip = dir === -1;
-        if (INVERT_WALK_FACING) flip = !flip;
-        if (flip) {
+        // Face movement direction (flip on moving left)
+        if (dir === -1) {
           const cx = Math.round(x + drawW / 2);
           ctx.translate(cx, 0); ctx.scale(-1, 1); ctx.translate(-cx, 0);
         }
@@ -735,29 +713,19 @@ export default function Tamagotchi({
         petRectRef.current = null;
       }
 
-      // Cleaning (scoop pass) — moves right->left and clears poops in radius
+      // Cleaning (scoop pass)
       if (cleaningRef.current && cleaningRef.current.active) {
         const s = cleaningRef.current;
         s.x -= (SCOOP_SPEED_PX_S * dt) / 1000; // move left
-        // draw scoop
         const scoopImg = images[SCOOP_SRC];
         const scoopH = SCOOP_HEIGHT_TARGET;
         const scoopW = scoopImg ? Math.round((scoopImg.width / Math.max(1, scoopImg.height)) * scoopH) : 26;
         const y = Math.round(LOGICAL_H - BASE_GROUND - scoopH + 2);
         if (scoopImg) ctx.drawImage(scoopImg, Math.round(s.x), y, scoopW, scoopH);
-        else {
-          // fallback rectangle with emoji
-          ctx.fillStyle = "#c7cbe8";
-          ctx.fillRect(Math.round(s.x), y, scoopW, scoopH);
-          ctx.font = "12px monospace";
-          ctx.fillStyle = "#111";
-          ctx.fillText("🧹", Math.round(s.x) + 6, y + scoopH - 6);
-        }
-        // clear poops in radius from scoop front edge
+        else { ctx.fillStyle = "#c7cbe8"; ctx.fillRect(Math.round(s.x), y, scoopW, scoopH); ctx.font = "12px monospace"; ctx.fillStyle = "#111"; ctx.fillText("🧹", Math.round(s.x) + 6, y + scoopH - 6); }
         const frontX = s.x + scoopW * 0.5;
         const remaining = poopsRef.current.filter((p) => Math.abs(p.x - frontX) > SCOOP_CLEAR_RADIUS);
         if (remaining.length !== poopsRef.current.length) setPoops(remaining);
-        // finish when passed left edge
         if (s.x < -scoopW - 8) {
           setCleaning(null);
           setStats((st) => clampStats({ ...st, cleanliness: Math.max(st.cleanliness, CLEAN_FINISH_CLEANLINESS), happiness: st.happiness + 0.02 }));
@@ -769,12 +737,11 @@ export default function Tamagotchi({
       if (cat && now < cat.until) drawBanner(ctx, LOGICAL_W, `⚠ ${cat.cause}! stats draining fast`);
       if (!deadRef.current && sleepingNow) drawBanner(ctx, LOGICAL_W, "😴 Sleeping");
 
-      // Food 3-frame throw animation (anchored near pet head; fades out)
+      // Food throw (3 frames near head)
       if (foodAnimRef.current) {
         const fa = foodAnimRef.current;
-        const elapsed = now - fa.startedAt;
+        const elapsed = Date.now() - fa.startedAt;
         if (elapsed >= FEED_ANIM_TOTAL_MS) {
-          // stop anim
           if (foodAnimRef.current) setFoodAnim(null);
         } else {
           const frames = FEED_FRAMES[fa.kind];
@@ -789,31 +756,25 @@ export default function Tamagotchi({
             const h = Math.round(img.height * 0.5);
             ctx.drawImage(img, Math.round(baseX), Math.round(baseY), w, h);
           } else {
-            // emoji fallback
             ctx.font = "16px monospace";
             ctx.fillText(fa.kind === "burger" ? "🍔" : "🎂", Math.round(baseX), Math.round(baseY));
           }
         }
       }
 
-      ctx.restore(); // end shifted world
+      ctx.restore(); // world
     };
 
-    // Start a single RAF loop for this instance
     if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(loop);
 
-    // Cleanup
     return () => {
       if (ro) ro.disconnect();
       else window.removeEventListener("resize", resize);
-      if (rafRef.current != null) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
-      }
+      if (rafRef.current != null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
     };
 
-    /** Draws avatar HUD (top-right), respecting AVATAR_SCALE_CAP */
+    /** Draws avatar HUD (top-right) */
     function drawAvatarHUD(ctx2: CanvasRenderingContext2D, images2: Record<string, HTMLImageElement>) {
       const now = Date.now();
       const sleepingNow = isSleepingAt(now);
@@ -830,7 +791,7 @@ export default function Tamagotchi({
       if (avatarSrc && images2[avatarSrc]) {
         const av = images2[avatarSrc];
 
-        // Scale down only if cap is set and native sprite is larger
+        // scale DOWN only if larger than cap
         let aw = av.width, ah = av.height;
         if (typeof AVATAR_SCALE_CAP === "number") {
           const nativeMax = Math.max(av.width, av.height);
@@ -846,7 +807,6 @@ export default function Tamagotchi({
         (ctx2 as any).imageSmoothingEnabled = false;
         ctx2.drawImage(av, ax, ay, aw, ah);
 
-        // HP badge anchored to bottom-right of the avatar
         const hp = Math.round((statsRef.current.health ?? 0) * 100);
         const label = `❤️ ${hp}%`;
         ctx2.font = "10px monospace";
@@ -864,9 +824,9 @@ export default function Tamagotchi({
   }
 
   /** UI */
-  const burgerLeft = Math.max(0, FEED_COOLDOWN_MS - (nowMs() - lastBurgerAt));
-  const cakeLeft   = Math.max(0, FEED_COOLDOWN_MS - (nowMs() - lastCakeAt));
-  const healLeft   = Math.max(0, HEAL_COOLDOWN_MS - (nowMs() - lastHealAt));
+  const burgerLeft = Math.max(0, FEED_COOLDOWN_MS - (Date.now() - lastBurgerAt));
+  const cakeLeft   = Math.max(0, FEED_COOLDOWN_MS - (Date.now() - lastCakeAt));
+  const healLeft   = Math.max(0, HEAL_COOLDOWN_MS - (Date.now() - lastHealAt));
 
   return (
     <div style={{ width: "min(92vw, 100%)", maxWidth: MAX_W, margin: "0 auto" }}>
@@ -886,11 +846,7 @@ export default function Tamagotchi({
             {deathReason && <div className="muted" style={{ marginBottom: 6 }}>Cause: {deathReason}</div>}
             <div className="muted" style={{ marginBottom: 12 }}>Lives left: <b>{lives}</b></div>
             <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
-              {lives > 0 && (
-                <button className="btn btn-primary" onClick={spendLifeToRevive}>
-                  Spend 1 life to revive
-                </button>
-              )}
+              {lives > 0 && <button className="btn btn-primary" onClick={spendLifeToRevive}>Spend 1 life to revive</button>}
               <button className="btn" onClick={newGame}>🔄 New Game</button>
             </div>
             {lives <= 0 && <div className="muted" style={{ marginTop: 8 }}>Transfer 1 NFT to get a life (or start a New Game).</div>}
@@ -923,7 +879,6 @@ export default function Tamagotchi({
         <button className="btn" onClick={act.clean} disabled={!canClean || poops.length === 0}>
           🧻 Clean{cleaning ? " (running...)" : ""}
         </button>
-        <button className="btn" onClick={() => setAnim((a) => (a === "walk" ? "idle" : "walk"))}>Toggle Walk/Idle</button>
         <button className="btn btn-primary" onClick={() => setForm(forceEvolve(form))}>⭐ Evolve (debug)</button>
         <span className="muted" style={{ alignSelf: "center" }}>
           Poop: {poops.length} | Form: {prettyName(form)} {isSick ? " | 🤒 Sick" : ""} {catastrophe && Date.now() < catastrophe.until ? " | ⚠ Event" : ""} | Age: {(ageMs/1000|0)}s
@@ -931,9 +886,7 @@ export default function Tamagotchi({
       </div>
 
       {/* Sleep controls */}
-      <div
-        style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", justifyContent: "center" }}
-      >
+      <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", justifyContent: "center" }}>
         <label style={{ display: "flex", alignItems: "center", gap: 6, opacity: sleepLocked ? 0.5 : 1 }}>
           <input type="checkbox" checked={useAutoTime} disabled={sleepLocked} onChange={(e) => setUseAutoTime(e.target.checked)} />
           Auto local sleep 22:00–08:30
@@ -985,29 +938,17 @@ function prettyName(f: FormKey) {
   return f;
 }
 
-// Debug evolve follows real rules (egg -> random child; child -> mapped adult)
 function forceEvolve(f: FormKey): FormKey {
-  if (f === "egg") {
-    return pickOne(["chog_child", "molandak_child", "moyaki_child", "we_child"] as const) as FormKey;
-  }
+  if (f === "egg") return pickOne(["chog_child","molandak_child","moyaki_child","we_child"] as const) as FormKey;
   if (String(f).endsWith("_child")) {
-    const map: Record<string, FormKey> = {
-      chog_child: "Chog",
-      molandak_child: "Molandak",
-      moyaki_child: "Moyaki",
-      we_child: "WE",
-    };
+    const map: Record<string, FormKey> = { chog_child:"Chog", molandak_child:"Molandak", moyaki_child:"Moyaki", we_child:"WE" };
     return (map[String(f)] || f) as FormKey;
   }
   return f;
 }
 
 function deadCandidates(form: FormKey): string[] {
-  return [
-    `/sprites/${String(form)}/dead.png`,
-    `/sprites/dead/${String(form)}.png`,
-    DEAD_FALLBACK,
-  ];
+  return [`/sprites/${String(form)}/dead.png`, `/sprites/dead/${String(form)}.png`, DEAD_FALLBACK];
 }
 
 function useLatest<T>(v: T) { const r = useRef(v); useEffect(() => { r.current = v; }, [v]); return r; }
@@ -1022,12 +963,6 @@ async function loadImageSafe(src: string): Promise<{ src: string; img: HTMLImage
     catch { resolve(null); }
   });
 }
-
-/** Spawns a poop at random X within stage */
-function spawnPoop(setter?: React.Dispatch<React.SetStateAction<Poop[]>>): void;
-function spawnPoop() {
-  // this function is re-bound in component via closure to call setPoops
-}
 function drawBanner(ctx: CanvasRenderingContext2D, width: number, text: string) {
   const pad = 4; ctx.save(); ctx.font = "12px monospace";
   const w = Math.ceil(ctx.measureText(text).width) + pad * 2;
@@ -1037,17 +972,73 @@ function drawBanner(ctx: CanvasRenderingContext2D, width: number, text: string) 
   ctx.restore();
 }
 
-/** Inline closure binds to component's setPoops */
-function spawnPoopImpl(setPoops: React.Dispatch<React.SetStateAction<Poop[]>>) {
-  return function realSpawn() {
-    setPoops((arr) => {
-      const x = 8 + Math.random() * (LOGICAL_W - 16);
-      const src = pickOne(POOP_SRCS);
-      const max = 12;
-      const next = [...arr, { x, src }];
-      return next.slice(-max);
-    });
-  };
+/** Offline minute-by-minute simulation honoring schedule & sleep */
+function simulateOffline(args: {
+  startWall: number; minutes: number; startAgeMs: number;
+  startStats: Stats; startSick: boolean;
+  sleepCheck: (ts: number) => boolean;
+  schedule: number[]; consumed: number[];
+}): { stats: Stats; sick: boolean; newConsumed: number[] } {
+  let s = { ...args.startStats };
+  let sick = args.startSick;
+  const newly: number[] = [];
+
+  const hungerPerMinNormal = 1 / 90;
+  const healthPerMinNormal = 1 / (10 * 60);
+  const happyPerMinNormal  = 1 / (12 * 60);
+  const dirtPerMinNormal   = 1 / (12 * 60);
+
+  const healthPerMinSick = 1 / 7;
+  const happyPerMinSick  = 1 / 8;
+
+  const hungerPerMinFast = 1; // catastrophe: near zero in ~1 min
+
+  const schedule = [...(args.schedule || [])].sort((a,b)=>a-b);
+  const consumedSet = new Set<number>(args.consumed || []);
+
+  for (let i = 0; i < args.minutes; i++) {
+    const minuteWall = args.startWall + i * 60000;
+    const sleeping = args.sleepCheck(minuteWall);
+
+    // catastrophe activation per minute (if awake)
+    let catastropheActive = false;
+    for (const t of schedule) {
+      if (consumedSet.has(t)) continue;
+      if (minuteWall >= t && minuteWall < t + CATA_DURATION_MS && !sleeping) {
+        catastropheActive = true;
+        newly.push(t);
+        consumedSet.add(t);
+        break;
+      }
+    }
+
+    if (!sleeping) {
+      const hungerDrop = catastropheActive ? hungerPerMinFast : hungerPerMinNormal;
+      const healthDrop = sick ? healthPerMinSick : healthPerMinNormal;
+      const happyDrop  = sick ? happyPerMinSick  : happyPerMinNormal;
+      const dirtDrop   = dirtPerMinNormal;
+
+      s = clampStats({
+        cleanliness: s.cleanliness - dirtDrop,
+        hunger:      s.hunger      - hungerDrop,
+        happiness:   s.happiness   - happyDrop,
+        health:      s.health      - healthDrop,
+      });
+
+      // illness rolls (minute granularity)
+      if (!sick) {
+        const lowClean = 1 - s.cleanliness;
+        const p = 0.02 + 0.3 * 0.3 + 0.2 * lowClean;
+        if (Math.random() < p * 0.03 * 60) sick = true;
+      } else {
+        if (Math.random() < 0.015 * 60) sick = false;
+      }
+    }
+
+    if (s.hunger <= 0 || s.health <= 0) break; // died offline
+  }
+
+  return { stats: clampStats(s), sick, newConsumed: newly };
 }
 
 /** Small UI atoms */
@@ -1071,10 +1062,3 @@ function OverlayCard({ children }: { children: React.ReactNode }) {
     </div>
   );
 }
-
-/** ===== Bind closures that need component state (spawnPoop) ===== */
-function Tamagotchi_bindSpawn(setPoops: React.Dispatch<React.SetStateAction<Poop[]>>) {
-  return spawnPoopImpl(setPoops);
-}
-const _bindSpawnSymbol = Symbol("bindSpawn");
-(Tamagotchi as any)[_bindSpawnSymbol] = Tamagotchi_bindSpawn;
