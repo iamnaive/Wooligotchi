@@ -64,7 +64,10 @@ const BAR_H = 6, BASE_GROUND = 48, Y_SHIFT = 26;
 
 /** Extra vertical adjustments */
 const EXTRA_DOWN = 10;       // poops & scoop lower by 10px
-const PET_LIFT  = 5      // push pet ~26px lower vs ground
+// подняли питомцев на 27 px вверх относительно предыдущего положения (-26 вниз ранее)
+// формула: iy = baseline - drawH - PET_RAISE
+// здесь PET_RAISE = 1 даёт чистый подъём на 27 px от старого положения
+const PET_RAISE  = 1;
 
 const HEAL_COOLDOWN_MS = 60_000;
 
@@ -180,9 +183,6 @@ export default function Tamagotchi({
 
   // catastrophe
   const [catastrophe, setCatastrophe] = useState<Catastrophe | null>(null);
-
-  // modal
-  const [showNFTPrompt, setShowNFTPrompt] = useState<boolean>(false);
 
   /** Refs */
   const animRef = useLatest(anim);
@@ -307,7 +307,7 @@ export default function Tamagotchi({
       localStorage.setItem(sk(CATA_SCHEDULE_KEY), JSON.stringify(schedule.slice(0, 4)));
       if (!consumed) localStorage.setItem(sk(CATA_CONSUMED_KEY), JSON.stringify([]));
     } catch {}
-  }, [startTs]); // eslint-disable-line react-hooks/ex exhaustive-deps
+  }, [startTs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Offline catch-up with death surfacing */
   useEffect(() => {
@@ -475,7 +475,7 @@ export default function Tamagotchi({
     },
   };
 
-  /** New game flow (не используется в UI до получения жизни) */
+  /** New game flow */
   const performReset = () => {
     try {
       localStorage.removeItem(sk(START_TS_KEY));
@@ -511,13 +511,12 @@ export default function Tamagotchi({
     window.dispatchEvent(new CustomEvent("wg:new-game"));
   };
 
-  /** Автосписание жизни при смерти (если есть жизни) */
+  /** Автосписание жизни при смерти: списываем и сразу рестартим */
   useEffect(() => {
     if (isDead && lives > 0 && !lifeSpentForThisDeath) {
       onLoseLife();
       setLifeSpentForThisDeath(true);
-      // после потерянной жизни перезапуск игры:
-      performReset();
+      performReset(); // моментальный новый раунд
     }
     if (isDead) {
       window.dispatchEvent(new CustomEvent("wg:pet-dead"));
@@ -644,13 +643,13 @@ export default function Tamagotchi({
     resize();
 
     // ---- Motion vars (float physics; integer draw) ----
-const EDGE_EPS = 2;               // зазор внутрь сцены
-const TURN_COOLDOWN = 160;        // мс без проверок границы после разворота
-let dir: 1 | -1 = 1;
-let x = 40;                       // float позиция
-let lastTurnAt = -1e9;            // perf timestamp
-let last = performance.now();
-let frameTimer = 0;
+    const EDGE_EPS = 2;
+    const TURN_COOLDOWN = 160; // ms
+    let dir: 1 | -1 = 1;
+    let x = 40;                // float pos
+    let lastTurnAt = -1e9;     // perf ts
+    let last = performance.now();
+    let frameTimer = 0;
 
     const loop = (ts: number) => {
       rafRef.current = requestAnimationFrame(loop);
@@ -672,15 +671,15 @@ let frameTimer = 0;
         ctx.drawImage(bg, dx, dy, dw, dh);
       }
 
-      // avatar (top-right) -----------------------------
+      // --- Top-right avatar ---
       const nowAbs = Date.now();
       const sleepingNow = isSleepingAt(nowAbs);
       const avatarAnimKey: AnimKey = (() => {
         if (deadRef.current) return "idle";
-        if (sleepingNow) return def.sleep?.length ? "sleep" : "idle";
+        if (sleepingNow) return (def.sleep?.length ? "sleep" : "idle") as AnimKey;
         if (sickRef.current && (def.sick?.length ?? 0) > 0) return "sick";
         if (statsRef.current.happiness < 0.35) return (def.sad?.length ? "sad" : def.unhappy?.length ? "unhappy" : "idle") as AnimKey;
-        return def.idle?.length ? "idle" : "walk";
+        return (def.idle?.length ? "idle" : "walk") as AnimKey;
       })();
       const avatarFrames = (def[avatarAnimKey] ?? def.idle ?? def.walk ?? []) as string[];
       const avatarSrc = avatarFrames[0];
@@ -714,7 +713,7 @@ let frameTimer = 0;
         ctx.fillText(label, tx, ty);
       }
 
-      // World layer -----------------------------------
+      // World layer (shifted down)
       ctx.save();
       ctx.translate(0, Y_SHIFT);
 
@@ -730,16 +729,16 @@ let frameTimer = 0;
         }
       }
 
-      // choose anim for world
+      // Choose anim
       const chosenAnim: AnimKey = (() => {
         if (deadRef.current) return "idle";
-        if (sleepingNow) return def.sleep?.length ? "sleep" : "idle";
-        if (sickRef.current) return def.sick?.length ? "sick" : "idle";
+        if (sleepingNow) return (def.sleep?.length ? "sleep" : "idle") as AnimKey;
+        if (sickRef.current) return (def.sick?.length ? "sick" : "idle") as AnimKey;
         if (statsRef.current.happiness < 0.35) return (def.sad?.length ? "sad" : def.unhappy?.length ? "unhappy" : "walk") as AnimKey;
         return animRef.current;
       })();
 
-      // frames
+      // Frames
       let framesAll = (def[chosenAnim] ?? def.idle ?? def.walk ?? []) as string[];
       framesAll = framesAll.filter(Boolean);
       if (!sleepingNow && framesAll.length < 2 && (def.walk?.length ?? 0) >= 2) framesAll = def.walk!;
@@ -749,66 +748,34 @@ let frameTimer = 0;
       const rawW = base?.width ?? 32;
       const rawH = base?.height ?? 32;
 
-      // scale
+      // Scale
       const stage = getLifeStage(formRef.current);
       const targetH = stage === "egg" ? EGG_TARGET_H : (stage === "child" ? CHILD_TARGET_H : ADULT_TARGET_H);
       const scale = (targetH / Math.max(1, rawH));
       const drawW = Math.round(rawW * scale), drawH = Math.round(rawH * scale);
 
-      // --------- physics with edge projection ----------
-const minX = 0;
-const maxX = LOGICAL_W - drawW;
-let xNext = x + (dir * WALK_SPEED * dt) / 1000;
-const inTurnCooldown = (ts - lastTurnAt) < TURN_COOLDOWN;
+      // -------- physics with edge projection + cooldown --------
+      const minX = 0;
+      const maxX = LOGICAL_W - drawW;
 
-if (!deadRef.current && !sleepingNow) {
-  if (!inTurnCooldown) {
-    if (dir === 1 && xNext >= maxX) {
-      dir = -1;
-      lastTurnAt = ts;
-      x = maxX - EDGE_EPS;       // жёстко внутрь поля
-      frameTimer = 0;
-    } else if (dir === -1 && xNext <= minX) {
-      dir = 1;
-      lastTurnAt = ts;
-      x = minX + EDGE_EPS;
-      frameTimer = 0;
-    } else {
-      x = xNext;
-    }
-  } else {
-    // пока кулдаун — двигаемся и клампим, чтобы не вылетать и не дёргаться
-    x = Math.min(Math.max(xNext, minX + EDGE_EPS), maxX - EDGE_EPS);
-  }
-}
-
-      // projected next position
       let xNext = x + (dir * WALK_SPEED * dt) / 1000;
-
       const inTurnCooldown = (ts - lastTurnAt) < TURN_COOLDOWN;
 
       if (!deadRef.current && !sleepingNow) {
         if (!inTurnCooldown) {
           if (dir === 1 && xNext >= maxX) {
-            dir = -1;
-            lastTurnAt = ts;
-            x = maxX - EDGE_EPS;       // сразу внутрь поля
-            frameTimer = 0;
+            dir = -1; lastTurnAt = ts; x = maxX - EDGE_EPS; frameTimer = 0;
           } else if (dir === -1 && xNext <= minX) {
-            dir = 1;
-            lastTurnAt = ts;
-            x = minX + EDGE_EPS;
-            frameTimer = 0;
+            dir = 1;  lastTurnAt = ts; x = minX + EDGE_EPS; frameTimer = 0;
           } else {
             x = xNext;
           }
         } else {
-          // во время кулдауна просто двигаемся внутрь и жёстко ограничиваем зазором
           x = Math.min(Math.max(xNext, minX + EDGE_EPS), maxX - EDGE_EPS);
         }
       }
 
-      // frame switching
+      // Frame switching
       frameTimer += dt;
       if (frameTimer > 1e6) frameTimer %= 1e6;
       let frameIndex = 0;
@@ -817,7 +784,7 @@ if (!deadRef.current && !sleepingNow) {
         frameIndex = step % frames.length;
       }
 
-      // draw pet/dead
+      // Draw pet or dead
       if (deadRef.current) {
         const list = deadCandidates(formRef.current);
         const deadSrc = list.find((p) => images[p]);
@@ -826,23 +793,26 @@ if (!deadRef.current && !sleepingNow) {
           const w = Math.round(deadImg.width * scale);
           const h = Math.round(deadImg.height * scale);
           const ix = Math.round((LOGICAL_W - w) / 2);
-          const iy = Math.round(LOGICAL_H - BASE_GROUND - h - PET_LIFT);
+          const iy = Math.round(LOGICAL_H - BASE_GROUND - h - PET_RAISE);
           ctx.drawImage(deadImg, ix, iy, w, h);
         }
       } else if (frames.length) {
-        ctx.save();
-const flip = dir === -1;
-if (flip) {
-  const cx = Math.round(x + drawW / 2);
-  ctx.translate(cx, 0); ctx.scale(-1, 1); ctx.translate(-cx, 0);
-}
-        const ix = Math.round(x), iy = Math.round(LOGICAL_H - BASE_GROUND - drawH - PET_LIFT);
+        const ix = Math.round(x);
+        const iy = Math.round(LOGICAL_H - BASE_GROUND - drawH - PET_RAISE);
         const img = images[frames[Math.min(frameIndex, frames.length - 1)]];
-        if (img) ctx.drawImage(img, ix, iy, drawW, drawH);
-        ctx.restore();
+        if (img) {
+          if (dir === -1) {
+            ctx.save();
+            ctx.scale(-1, 1);
+            ctx.drawImage(img, -(ix + drawW), iy, drawW, drawH); // зеркальный X
+            ctx.restore();
+          } else {
+            ctx.drawImage(img, ix, iy, drawW, drawH);
+          }
+        }
       }
 
-      // scoop
+      // Cleaning scoop
       if (cleaningRef.current?.active) {
         const st = cleaningRef.current!;
         const scoopImg = images[SCOOP_SRC];
@@ -860,17 +830,18 @@ if (flip) {
         }
       }
 
-      // banners
+      // Banners
       const cat = catastropheRef.current;
       if (cat && nowAbs < cat.until) drawBanner(ctx, LOGICAL_W, `⚠ ${cat.cause}! stats draining fast`);
       if (!deadRef.current && sleepingNow) drawBanner(ctx, LOGICAL_W, "😴 Sleeping");
 
-      ctx.restore();
+      ctx.restore(); // end shifted world
     };
 
     if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(loop);
 
+    // cleanup
     return () => {
       if (ro) ro.disconnect();
       else window.removeEventListener("resize", resize);
@@ -888,31 +859,6 @@ if (flip) {
 
   /** Clipboard helper */
   const copyAddr = async () => { try { await navigator.clipboard.writeText(NFT_CONTRACT); } catch {} };
-
-  /** Death overlay — одна кнопка, только запрос на трансфер */
-  const DeathOverlay = isDead ? (
-    <OverlayCard>
-      <div style={{ fontSize: 18, marginBottom: 6 }}>Your pet has died</div>
-      {deathReason && <div className="muted" style={{ marginBottom: 12 }}>Cause: {deathReason}</div>}
-      <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
-        <button
-          className="btn btn-primary"
-          onClick={() => {
-            // Сообщаем внешнему слою открыть модал/отправить NFT.
-            // Внешний код ПОСЛЕ подтверждения должен диспатчить:
-            // window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address: walletAddress } }))
-            window.dispatchEvent(
-              new CustomEvent("wg:request-nft", {
-                detail: { to: NFT_CONTRACT, address: walletAddress }
-              })
-            );
-          }}
-        >
-          Send 1 NFT → +1 life
-        </button>
-      </div>
-    </OverlayCard>
-  ) : null;
 
   /** ===== UI ===== */
   return (
@@ -934,7 +880,6 @@ if (flip) {
         }}
       >
         <canvas ref={canvasRef} style={{ display: "block", imageRendering: "pixelated", background: "transparent", borderRadius: 12 }} />
-        {DeathOverlay}
       </div>
 
       {/* Status bars */}
@@ -1142,15 +1087,6 @@ function Bar({ label, value, h = 6 }: { label: string; value: number; h?: number
       <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 4 }}>{label}</div>
       <div style={{ height: h, width: "100%", borderRadius: Math.max(6, h), background: "rgba(255,255,255,0.08)", overflow: "hidden" }}>
         <div style={{ width: `${pct}%`, height: "100%", background: "linear-gradient(90deg, rgba(124,77,255,0.9), rgba(0,200,255,0.9))" }} />
-      </div>
-    </div>
-  );
-}
-function OverlayCard({ children }: { children: React.ReactNode }) {
-  return (
-    <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", background: "rgba(0,0,0,0.45)", backdropFilter: "blur(2px)" }}>
-      <div className="card" style={{ padding: 14, borderRadius: 12, minWidth: 260, textAlign: "center", background: "rgba(10,10,18,0.85)", border: "1px solid rgba(255,255,255,0.12)" }}>
-        {children}
       </div>
     </div>
   );
