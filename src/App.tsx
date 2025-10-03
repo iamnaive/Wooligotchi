@@ -266,41 +266,36 @@ function AppInner() {
   // Lives from local storage
   const lives = useLivesGate(chainId, address);
 
-  // Keep game mounted after death even if lives = 0 (so DeathOverlay is visible)
+  // Keep game mounted and force form=egg on new game
   const [forceGame, setForceGame] = useState(false);
- // Держим игру смонтированной и на новый старт фиксируем форму = "egg"
-useEffect(() => {
-  const onDead = () => setForceGame(true);
-  const onNew = () => {
-    setForceGame(false);
-    setForm("egg");
-    saveForm("egg"); // <- чтобы локалсторедж тоже обновился
-  };
-  window.addEventListener("wg:pet-dead", onDead as any);
-  window.addEventListener("wg:new-game", onNew as any);
-  return () => {
-    window.removeEventListener("wg:pet-dead", onDead as any);
-    window.removeEventListener("wg:new-game", onNew as any);
-  };
-}, []);
-
-
- // After on-chain confirmation of NFT transfer — grant exactly 1 life
-useEffect(() => {
-  const onConfirmed = (e: any) => {
-    const from = (e?.detail?.address as `0x${string}` | undefined) || address;
-    grantLives(chainId, from, 1);
-  };
-  window.addEventListener("wg:nft-confirmed", onConfirmed as any);
-  return () => window.removeEventListener("wg:nft-confirmed", onConfirmed as any);
-}, [chainId, address]);
-
-
-  // Form state (kept as-is)
-  const [form, setForm] = useState<FormKey>(() => loadForm());
   useEffect(() => {
-    saveForm(form);
-  }, [form]);
+    const onDead = () => setForceGame(true);
+    const onNew = () => {
+      setForceGame(false);
+      setForm("egg");   // гарантированно после рестарта начинаем с яйца
+      saveForm("egg");  // фиксируем в localStorage, чтобы не проскочила стадия
+    };
+    window.addEventListener("wg:pet-dead", onDead as any);
+    window.addEventListener("wg:new-game", onNew as any);
+    return () => {
+      window.removeEventListener("wg:pet-dead", onDead as any);
+      window.removeEventListener("wg:new-game", onNew as any);
+    };
+  }, []);
+
+  // After on-chain confirmation of NFT transfer — grant exactly 1 life
+  useEffect(() => {
+    const onConfirmed = (e: any) => {
+      const from = (e?.detail?.address as `0x${string}` | undefined) || address;
+      grantLives(chainId, from, 1);
+    };
+    window.addEventListener("wg:nft-confirmed", onConfirmed as any);
+    return () => window.removeEventListener("wg:nft-confirmed", onConfirmed as any);
+  }, [chainId, address]);
+
+  // Form state
+  const [form, setForm] = useState<FormKey>(() => loadForm());
+  useEffect(() => { saveForm(form); }, [form]);
   const petConfig = useMemo(() => makeConfigFromForm(form), [form]);
 
   const walletItems = useMemo(
@@ -340,17 +335,12 @@ useEffect(() => {
   };
 
   const evolve = React.useCallback((next?: FormKey) => {
-  if (next && catalog[next]) {
-    setForm(next);   // сохраняем форму, пришедшую из Tamagotchi
-    return next;
-  }
-  return next as any;
-}, []);
+    const n = next ?? nextFormRandom(form);
+    setForm(n);
+    return n;
+  }, [form]);
 
   // Gate:
-  // - splash: not connected
-  // - locked: connected but no lives AND not in forceGame (first time)
-  // - game: otherwise
   const gate: "splash" | "locked" | "game" =
     !isConnected ? "splash" : lives <= 0 && !forceGame ? "locked" : "game";
 
@@ -398,7 +388,6 @@ useEffect(() => {
       {gate === "locked" && (
         <Splash>
           <div className="muted">Send 1 NFT → get 1 life</div>
-          {/* Ensure VaultPanel shows FULL contract and FULL sender address */}
           <VaultPanel mode="cta" showFullAddresses />
         </Splash>
       )}
