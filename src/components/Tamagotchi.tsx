@@ -307,7 +307,7 @@ export default function Tamagotchi({
       localStorage.setItem(sk(CATA_SCHEDULE_KEY), JSON.stringify(schedule.slice(0, 4)));
       if (!consumed) localStorage.setItem(sk(CATA_CONSUMED_KEY), JSON.stringify([]));
     } catch {}
-  }, [startTs]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [startTs]); // eslint-disable-line react-hooks/ex exhaustive-deps
 
   /** Offline catch-up with death surfacing */
   useEffect(() => {
@@ -475,8 +475,7 @@ export default function Tamagotchi({
     },
   };
 
-  /** New game flow */
-  const newGame = () => { setShowNFTPrompt(true); };
+  /** New game flow (не используется в UI до получения жизни) */
   const performReset = () => {
     try {
       localStorage.removeItem(sk(START_TS_KEY));
@@ -512,11 +511,13 @@ export default function Tamagotchi({
     window.dispatchEvent(new CustomEvent("wg:new-game"));
   };
 
-  /** Auto spend 1 life (online and after offline death) */
+  /** Автосписание жизни при смерти (если есть жизни) */
   useEffect(() => {
     if (isDead && lives > 0 && !lifeSpentForThisDeath) {
       onLoseLife();
       setLifeSpentForThisDeath(true);
+      // после потерянной жизни перезапуск игры:
+      performReset();
     }
     if (isDead) {
       window.dispatchEvent(new CustomEvent("wg:pet-dead"));
@@ -642,22 +643,14 @@ export default function Tamagotchi({
     else { window.addEventListener("resize", resize); }
     resize();
 
-    const BASELINE = LOGICAL_H - BASE_GROUND;
-    let dir: 1 | -1 = 1, x = 40;
-
-    // turn-pause & frame timer
-    let last = performance.now(), frameTimer = 0;
-    let turnPauseUntil = 0; // ms in perf timeline
-    let ignoreEdgeUntil = 0; // grace after pause to avoid re-trigger
-
-    // egg raw H for world autoscale
-    function getEggRawHeight(): number {
-      const eggSet = (catalog as any)["egg"] as AnyAnimSet;
-      const eggSrc = (eggSet?.idle?.[0] ?? eggSet?.walk?.[0]) as string | undefined;
-      const eggImg = eggSrc ? images[eggSrc] : undefined;
-      return eggImg ? eggImg.height : 32;
-    }
-    const eggRawH = getEggRawHeight();
+    // ---- Motion vars (float physics; integer draw) ----
+    const EDGE_EPS = 2;               // зазор внутрь сцены
+    const TURN_COOLDOWN = 160;        // мс без проверок границы после разворота
+    let dir: 1 | -1 = 1;
+    let x = 40;                       // float позиция
+    let lastTurnAt = -1e9;            // perf timestamp
+    let last = performance.now();
+    let frameTimer = 0;
 
     const loop = (ts: number) => {
       rafRef.current = requestAnimationFrame(loop);
@@ -679,7 +672,7 @@ export default function Tamagotchi({
         ctx.drawImage(bg, dx, dy, dw, dh);
       }
 
-      // --- Top-right avatar (scaled with cap) ---
+      // avatar (top-right) -----------------------------
       const nowAbs = Date.now();
       const sleepingNow = isSleepingAt(nowAbs);
       const avatarAnimKey: AnimKey = (() => {
@@ -707,7 +700,6 @@ export default function Tamagotchi({
         (ctx as any).imageSmoothingEnabled = false;
         ctx.drawImage(av, ax, ay, aw, ah);
 
-        // small HP label bottom-right
         const hp = Math.round((statsRef.current.health ?? 0) * 100);
         const label = `❤️ ${hp}%`;
         ctx.font = "10px monospace";
@@ -722,33 +714,11 @@ export default function Tamagotchi({
         ctx.fillText(label, tx, ty);
       }
 
-      // Food animation (top-left over background)
-      const curFood = foodAnimRef.current;
-      if (curFood) {
-        const elapsed = performance.now() - curFood.startedAt;
-        if (elapsed >= FEED_ANIM_TOTAL_MS) {
-          setFoodAnim(null);
-        } else {
-          const idx = Math.min(FEED_FRAMES_COUNT - 1, Math.floor((elapsed / FEED_ANIM_TOTAL_MS) * FEED_FRAMES_COUNT));
-          const list = FEED_FRAMES[curFood.kind];
-          const src = list[idx];
-          const img = images[src];
-          if (img) {
-            const nativeMax = Math.max(img.width, img.height);
-            const scale = nativeMax > FOOD_FRAME_MAX_PX ? FOOD_FRAME_MAX_PX / nativeMax : 1;
-            const fw = Math.round(img.width * scale);
-            const fh = Math.round(img.height * scale);
-            const fx = 8, fy = 8; // top-left corner
-            ctx.drawImage(img, fx, fy, fw, fh);
-          }
-        }
-      }
-
-      // World layer (shifted down)
+      // World layer -----------------------------------
       ctx.save();
       ctx.translate(0, Y_SHIFT);
 
-      // Poops (extra down)
+      // Poops
       const curPoops = poopsRef.current;
       if (curPoops.length) {
         for (const p of curPoops) {
@@ -760,7 +730,7 @@ export default function Tamagotchi({
         }
       }
 
-      // Choose anim for world
+      // choose anim for world
       const chosenAnim: AnimKey = (() => {
         if (deadRef.current) return "idle";
         if (sleepingNow) return def.sleep?.length ? "sleep" : "idle";
@@ -769,7 +739,7 @@ export default function Tamagotchi({
         return animRef.current;
       })();
 
-      // Frames fallback to walk if <2 and not sleeping
+      // frames
       let framesAll = (def[chosenAnim] ?? def.idle ?? def.walk ?? []) as string[];
       framesAll = framesAll.filter(Boolean);
       if (!sleepingNow && framesAll.length < 2 && (def.walk?.length ?? 0) >= 2) framesAll = def.walk!;
@@ -779,44 +749,52 @@ export default function Tamagotchi({
       const rawW = base?.width ?? 32;
       const rawH = base?.height ?? 32;
 
-      // Autoscale by life stage
+      // scale
       const stage = getLifeStage(formRef.current);
       const targetH = stage === "egg" ? EGG_TARGET_H : (stage === "child" ? CHILD_TARGET_H : ADULT_TARGET_H);
       const scale = (targetH / Math.max(1, rawH));
       const drawW = Math.round(rawW * scale), drawH = Math.round(rawH * scale);
 
-      // Motion with turn pause fix and edge grace
-      const inPause = ts < turnPauseUntil;
-      if (!deadRef.current && !sleepingNow && !inPause) {
-        x += (dir * WALK_SPEED * dt) / 1000;
-        const minX = 0, maxX = LOGICAL_W - drawW;
-        const allowEdgeCheck = ts >= ignoreEdgeUntil;
+      // --------- physics with edge projection ----------
+      const minX = 0;
+      const maxX = LOGICAL_W - drawW;
 
-        if (allowEdgeCheck && x < minX) {
-          x = minX + 1;
-          dir = 1;
-          turnPauseUntil = ts + 500;
-          ignoreEdgeUntil = turnPauseUntil + 60;
-          frameTimer = 0;
-        } else if (allowEdgeCheck && x > maxX) {
-          x = maxX - 1;
-          dir = -1;
-          turnPauseUntil = ts + 500;
-          ignoreEdgeUntil = turnPauseUntil + 60;
-          frameTimer = 0;
+      // projected next position
+      let xNext = x + (dir * WALK_SPEED * dt) / 1000;
+
+      const inTurnCooldown = (ts - lastTurnAt) < TURN_COOLDOWN;
+
+      if (!deadRef.current && !sleepingNow) {
+        if (!inTurnCooldown) {
+          if (dir === 1 && xNext >= maxX) {
+            dir = -1;
+            lastTurnAt = ts;
+            x = maxX - EDGE_EPS;       // сразу внутрь поля
+            frameTimer = 0;
+          } else if (dir === -1 && xNext <= minX) {
+            dir = 1;
+            lastTurnAt = ts;
+            x = minX + EDGE_EPS;
+            frameTimer = 0;
+          } else {
+            x = xNext;
+          }
+        } else {
+          // во время кулдауна просто двигаемся внутрь и жёстко ограничиваем зазором
+          x = Math.min(Math.max(xNext, minX + EDGE_EPS), maxX - EDGE_EPS);
         }
       }
 
-      // Frame switching
+      // frame switching
       frameTimer += dt;
       if (frameTimer > 1e6) frameTimer %= 1e6;
       let frameIndex = 0;
-      if (!inPause && frames.length >= 2) {
+      if (frames.length >= 2) {
         const step = Math.floor(frameTimer / (1000 / FPS));
         frameIndex = step % frames.length;
       }
 
-      // Draw pet or dead sprite (raised by PET_RAISE; negative -> down)
+      // draw pet/dead
       if (deadRef.current) {
         const list = deadCandidates(formRef.current);
         const deadSrc = list.find((p) => images[p]);
@@ -841,7 +819,7 @@ export default function Tamagotchi({
         ctx.restore();
       }
 
-      // Cleaning scoop travels & clears nearby poops
+      // scoop
       if (cleaningRef.current?.active) {
         const st = cleaningRef.current!;
         const scoopImg = images[SCOOP_SRC];
@@ -851,30 +829,25 @@ export default function Tamagotchi({
         const sy = Math.round(LOGICAL_H - BASE_GROUND - scoopH + EXTRA_DOWN);
         if (scoopImg) ctx.drawImage(scoopImg, Math.round(st.x), sy, scoopW, scoopH);
         else { ctx.font = "14px monospace"; ctx.fillText("🧹", Math.round(st.x), sy); }
-
-        // clear poops within radius from scoop "mouth" (front-left)
         const noseX = st.x + 6;
         setPoops((arr) => arr.filter((p) => Math.abs((p.x + 6) - noseX) > SCOOP_CLEAR_RADIUS));
-
-        // finish when left side reached
         if (st.x < -scoopW - 12) {
           setCleaning(null);
           setStats((s) => clampStats({ ...s, cleanliness: Math.max(s.cleanliness, CLEAN_FINISH_CLEANLINESS), happiness: s.happiness + 0.02 }));
         }
       }
 
-      // Banners
+      // banners
       const cat = catastropheRef.current;
       if (cat && nowAbs < cat.until) drawBanner(ctx, LOGICAL_W, `⚠ ${cat.cause}! stats draining fast`);
       if (!deadRef.current && sleepingNow) drawBanner(ctx, LOGICAL_W, "😴 Sleeping");
 
-      ctx.restore(); // end shifted world
+      ctx.restore();
     };
 
     if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(loop);
 
-    // cleanup
     return () => {
       if (ro) ro.disconnect();
       else window.removeEventListener("resize", resize);
@@ -893,13 +866,25 @@ export default function Tamagotchi({
   /** Clipboard helper */
   const copyAddr = async () => { try { await navigator.clipboard.writeText(NFT_CONTRACT); } catch {} };
 
-  /** Death overlay — одна кнопка */
+  /** Death overlay — одна кнопка, только запрос на трансфер */
   const DeathOverlay = isDead ? (
     <OverlayCard>
       <div style={{ fontSize: 18, marginBottom: 6 }}>Your pet has died</div>
       {deathReason && <div className="muted" style={{ marginBottom: 12 }}>Cause: {deathReason}</div>}
       <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
-        <button className="btn btn-primary" onClick={() => setShowNFTPrompt(true)}>
+        <button
+          className="btn btn-primary"
+          onClick={() => {
+            // Сообщаем внешнему слою открыть модал/отправить NFT.
+            // Внешний код ПОСЛЕ подтверждения должен диспатчить:
+            // window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address: walletAddress } }))
+            window.dispatchEvent(
+              new CustomEvent("wg:request-nft", {
+                detail: { to: NFT_CONTRACT, address: walletAddress }
+              })
+            );
+          }}
+        >
           Send 1 NFT → +1 life
         </button>
       </div>
@@ -988,29 +973,6 @@ export default function Tamagotchi({
           <span className="muted">Sleep window locked</span>
         )}
       </div>
-
-      {/* NFT modal — отправил → начислили жизнь → сразу новая игра */}
-      {showNFTPrompt && (
-        <OverlayCard>
-          <div style={{ fontSize: 16, marginBottom: 10 }}>Add a life by sending 1 NFT</div>
-          <div className="muted" style={{ marginBottom: 8 }}>Send to vault contract (full):</div>
-          <code style={{ fontSize: 12, marginBottom: 8, display: "block" }}>{NFT_CONTRACT}</code>
-          <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 12 }}>
-            <button className="btn" onClick={copyAddr}>Copy address</button>
-            <button
-              className="btn"
-              onClick={() => {
-                // notify parent -> credit 1 life out-of-band
-                window.dispatchEvent(new CustomEvent("wg:nft-sent", { detail: { address: walletAddress } }));
-                setShowNFTPrompt(false);
-                performReset(); // сразу начинаем новую игру
-              }}
-            >
-              I sent it
-            </button>
-          </div>
-        </OverlayCard>
-      )}
     </div>
   );
 }
