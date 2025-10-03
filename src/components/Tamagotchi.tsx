@@ -64,7 +64,7 @@ const BAR_H = 6, BASE_GROUND = 48, Y_SHIFT = 26;
 
 /** Extra vertical adjustments */
 const EXTRA_DOWN = 10;       // poops & scoop lower by 10px
-const PET_RAISE  = -26;      // push pet ~26px lower vs ground
+const PET_LIFT  = 5      // push pet ~26px lower vs ground
 
 const HEAL_COOLDOWN_MS = 60_000;
 
@@ -644,13 +644,13 @@ export default function Tamagotchi({
     resize();
 
     // ---- Motion vars (float physics; integer draw) ----
-    const EDGE_EPS = 2;               // зазор внутрь сцены
-    const TURN_COOLDOWN = 160;        // мс без проверок границы после разворота
-    let dir: 1 | -1 = 1;
-    let x = 40;                       // float позиция
-    let lastTurnAt = -1e9;            // perf timestamp
-    let last = performance.now();
-    let frameTimer = 0;
+const EDGE_EPS = 2;               // зазор внутрь сцены
+const TURN_COOLDOWN = 160;        // мс без проверок границы после разворота
+let dir: 1 | -1 = 1;
+let x = 40;                       // float позиция
+let lastTurnAt = -1e9;            // perf timestamp
+let last = performance.now();
+let frameTimer = 0;
 
     const loop = (ts: number) => {
       rafRef.current = requestAnimationFrame(loop);
@@ -756,8 +756,31 @@ export default function Tamagotchi({
       const drawW = Math.round(rawW * scale), drawH = Math.round(rawH * scale);
 
       // --------- physics with edge projection ----------
-      const minX = 0;
-      const maxX = LOGICAL_W - drawW;
+const minX = 0;
+const maxX = LOGICAL_W - drawW;
+let xNext = x + (dir * WALK_SPEED * dt) / 1000;
+const inTurnCooldown = (ts - lastTurnAt) < TURN_COOLDOWN;
+
+if (!deadRef.current && !sleepingNow) {
+  if (!inTurnCooldown) {
+    if (dir === 1 && xNext >= maxX) {
+      dir = -1;
+      lastTurnAt = ts;
+      x = maxX - EDGE_EPS;       // жёстко внутрь поля
+      frameTimer = 0;
+    } else if (dir === -1 && xNext <= minX) {
+      dir = 1;
+      lastTurnAt = ts;
+      x = minX + EDGE_EPS;
+      frameTimer = 0;
+    } else {
+      x = xNext;
+    }
+  } else {
+    // пока кулдаун — двигаемся и клампим, чтобы не вылетать и не дёргаться
+    x = Math.min(Math.max(xNext, minX + EDGE_EPS), maxX - EDGE_EPS);
+  }
+}
 
       // projected next position
       let xNext = x + (dir * WALK_SPEED * dt) / 1000;
@@ -803,17 +826,17 @@ export default function Tamagotchi({
           const w = Math.round(deadImg.width * scale);
           const h = Math.round(deadImg.height * scale);
           const ix = Math.round((LOGICAL_W - w) / 2);
-          const iy = Math.round(LOGICAL_H - BASE_GROUND - h - PET_RAISE);
+          const iy = Math.round(LOGICAL_H - BASE_GROUND - h - PET_LIFT);
           ctx.drawImage(deadImg, ix, iy, w, h);
         }
       } else if (frames.length) {
         ctx.save();
-        const flip = dir === -1;
-        if (flip) {
-          const cx = Math.round(x + drawW / 2);
-          ctx.translate(cx, 0); ctx.scale(-1, 1); ctx.translate(-cx, 0);
-        }
-        const ix = Math.round(x), iy = Math.round(LOGICAL_H - BASE_GROUND - drawH - PET_RAISE);
+const flip = dir === -1;
+if (flip) {
+  const cx = Math.round(x + drawW / 2);
+  ctx.translate(cx, 0); ctx.scale(-1, 1); ctx.translate(-cx, 0);
+}
+        const ix = Math.round(x), iy = Math.round(LOGICAL_H - BASE_GROUND - drawH - PET_LIFT);
         const img = images[frames[Math.min(frameIndex, frames.length - 1)]];
         if (img) ctx.drawImage(img, ix, iy, drawW, drawH);
         ctx.restore();
