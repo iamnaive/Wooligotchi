@@ -1,44 +1,39 @@
 'use client';
 
-import { useEffect, useMemo, useState } from "react";
-import { zeroAddress } from "viem";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { zeroAddress, type Address, isAddress } from "viem";
 import { useAccount, useConfig, useSwitchChain } from "wagmi";
 import { readContract, writeContract, getPublicClient } from "@wagmi/core";
 
-/** VaultPanel (ID-less path for ERC-721 Enumerable)
- * - No indexer. No scanning. Minimal RPC calls.
- * - If collection supports ERC721Enumerable, grab tokenId via tokenOfOwnerByIndex(owner, 0)
- *   and send it to VAULT in one click (no ID input).
- * - Fallback: manual send by tokenId (ERC-721) or by id (ERC-1155).
- * - Emits "wg:nft-confirmed" on success (the game listens to it).
- * - Public API unchanged: <VaultPanel mode="full" | "cta" />
+/**
+ * VaultPanel (safe, minimal-RPC, drop-in)
+ * - Manual send by ID for ERC-721 and ERC-1155 (range guard 0..10000).
+ * - One-click auto send via ERC721Enumerable: tokenOfOwnerByIndex(owner, 0).
+ * - Optional bounded scan for non-Enumerable 721: ownerOf(id) 0..10000 with early exit.
+ * - Emits "wg:nft-confirmed" on success (used by the game to grant a life).
+ * - Public API unchanged: <VaultPanel mode="full" | "cta" />. Comments in English only.
  */
 
-export default function VaultPanel({ mode = "full" }: { mode?: "full" | "cta" }) {
-  return <VaultPanelInner mode={mode} />;
-}
-
-/* ===== ENV / CONSTS ===== */
+// ====== ENV / CONSTS ======
 const MONAD_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
-const ALLOWED_CONTRACT = "0x88c78d5852f45935324c6d100052958f694e8446"; // your collection
-const VAULT = (import.meta.env.VITE_VAULT_ADDRESS as string) || zeroAddress;
-const EXPLORER = (import.meta.env.VITE_EXPLORER_URL as string | undefined) || "";
+const VAULT: Address = (import.meta.env.VITE_VAULT_ADDRESS as Address) ?? zeroAddress;
 
-/* ===== ABIs ===== */
+// Hardcoded collection to keep current game logic intact.
+const ALLOWED_CONTRACT: Address = "0x88c78d5852f45935324c6d100052958f694e8446";
+
+const IFACE_ERC165 = "0x01ffc9a7";
+const IFACE_ERC721 = "0x80ac58cd";
+const IFACE_ERC1155 = "0xd9b67a26";
+const IFACE_ERC721_ENUM = "0x780e9d63";
+
 const ERC165_ABI = [
   { type: "function", name: "supportsInterface", stateMutability: "view",
-    inputs: [{ name: "interfaceId", type: "bytes4" }], outputs: [{ type: "bool" }] },
+    inputs: [{ name: "interfaceId", type: "bytes4" }], outputs: [{ type: "bool" }]},
 ] as const;
-
-const IFACE_ERC721      = "0x80ac58cd";
-const IFACE_ERC1155     = "0xD9B67A26";
-const IFACE_ERC721_ENUM = "0x780e9d63";
 
 const ERC721_READ_ABI = [
   { type: "function", name: "ownerOf", stateMutability: "view",
     inputs: [{ name: "tokenId", type: "uint256" }], outputs: [{ type: "address" }] },
-  { type: "function", name: "balanceOf", stateMutability: "view",
-    inputs: [{ name: "owner", type: "address" }], outputs: [{ type: "uint256" }] },
   { type: "function", name: "tokenOfOwnerByIndex", stateMutability: "view",
     inputs: [{ name: "owner", type: "address" }, { name: "index", type: "uint256" }],
     outputs: [{ type: "uint256" }] },
@@ -62,22 +57,38 @@ const ERC1155_ABI = [
     outputs: [] },
 ] as const;
 
-/* ===== Lives (unchanged) ===== */
+// ====== Lives storage (local) ======
 const LIVES_KEY = "wg_lives_v1";
-const livesKey = (cid:number, addr:string)=>`${cid}:${addr.toLowerCase()}`;
-const getLives = (cid:number, addr?:string|null) => {
+function getLives(chainId: number, addr?: Address | null) {
   if (!addr) return 0;
-  const raw = localStorage.getItem(LIVES_KEY);
-  const map = raw ? (JSON.parse(raw) as Record<string, number>) : {};
-  return map[livesKey(cid, addr)] ?? 0;
-};
+  try {
+    const raw = localStorage.getItem(LIVES_KEY);
+    if (!raw) return 0;
+    const map = JSON.parse(raw) ?? {};
+    return Number(map?.[`${chainId}:${addr.toLowerCase()}`] ?? 0);
+  } catch { return 0; }
+}
+function addLife(chainId: number, addr: Address) {
+  try {
+    const raw = localStorage.getItem(LIVES_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    const k = `${chainId}:${addr.toLowerCase()}`;
+    map[k] = Number(map[k] ?? 0) + 1;
+    localStorage.setItem(LIVES_KEY, JSON.stringify(map));
+  } catch {}
+}
 
+// ====== UI ======
 type Std = "ERC721" | "ERC1155" | "UNKNOWN";
 
+export default function VaultPanel({ mode = "full" }: { mode?: "full" | "cta" }) {
+  return <VaultPanelInner mode={mode} />;
+}
+
 function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
+  const { address, isConnected, chainId } = useAccount();
   const cfg = useConfig();
-  const pc = useMemo(() => getPublicClient(cfg, { chainId: MONAD_CHAIN_ID }), [cfg]);
-  const { address, isConnected } = useAccount();
+  const pc = getPublicClient(cfg);
   const { switchChain } = useSwitchChain();
 
   const [std, setStd] = useState<Std>("UNKNOWN");
@@ -91,33 +102,22 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
   const [manualId721, setManualId721] = useState<string>("");
   const [manualId1155, setManualId1155] = useState<string>("");
 
+  // scan state
+  const [scanFrom, setScanFrom] = useState<string>("0");
+  const [scanTo, setScanTo] = useState<string>("10000");
+  const cancelRef = useRef<boolean>(false);
+
   function append(s: string) { setLog((p) => (p ? p + "\n" : "") + s); }
   const canSend = isConnected && VAULT !== zeroAddress;
 
-  useEffect(() => { if (address) setLives(getLives(MONAD_CHAIN_ID, address)); }, [address]);
-  useEffect(() => {
-    const onLives = () => setLives(getLives(MONAD_CHAIN_ID, address));
-    window.addEventListener("wg:lives-changed", onLives as any);
-    return () => window.removeEventListener("wg:lives-changed", onLives as any);
-  }, [address]);
-
-  // Detect token standards and enumerable support (only 2 cheap calls)
+  // Detect contract standard and Enumerable support
   useEffect(() => {
     (async () => {
       try {
         const [is721, is1155, isEnum] = await Promise.all([
-          readContract(cfg, {
-            abi: ERC165_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-            functionName: "supportsInterface", args: [IFACE_ERC721 as `0x${string}`], chainId: MONAD_CHAIN_ID,
-          }).catch(()=>false),
-          readContract(cfg, {
-            abi: ERC165_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-            functionName: "supportsInterface", args: [IFACE_ERC1155 as `0x${string}`], chainId: MONAD_CHAIN_ID,
-          }).catch(()=>false),
-          readContract(cfg, {
-            abi: ERC165_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-            functionName: "supportsInterface", args: [IFACE_ERC721_ENUM as `0x${string}`], chainId: MONAD_CHAIN_ID,
-          }).catch(()=>false),
+          readContract(cfg, { abi: ERC165_ABI, address: ALLOWED_CONTRACT, functionName: "supportsInterface", args: [IFACE_ERC721 as any], chainId: MONAD_CHAIN_ID }).catch(()=>false),
+          readContract(cfg, { abi: ERC165_ABI, address: ALLOWED_CONTRACT, functionName: "supportsInterface", args: [IFACE_ERC1155 as any], chainId: MONAD_CHAIN_ID }).catch(()=>false),
+          readContract(cfg, { abi: ERC165_ABI, address: ALLOWED_CONTRACT, functionName: "supportsInterface", args: [IFACE_ERC721_ENUM as any], chainId: MONAD_CHAIN_ID }).catch(()=>false),
         ]);
         if (is721) setStd("ERC721");
         else if (is1155) setStd("ERC1155");
@@ -131,22 +131,26 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ALLOWED_CONTRACT]);
 
-  /* ===== Utils ===== */
+  // keep lives in sync
+  useEffect(() => { setLives(getLives(MONAD_CHAIN_ID, address)); }, [address]);
+
+  function onSuccess(addr: Address) {
+    window.dispatchEvent(new CustomEvent("wg:nft-confirmed"));
+    addLife(MONAD_CHAIN_ID, addr);
+    setLives(getLives(MONAD_CHAIN_ID, addr));
+  }
+
   async function waitReceipt(hash: `0x${string}`) {
     try {
-      // Non-blocking: 0 confirmations, short timeout — feel faster
       const rcpt = await pc.waitForTransactionReceipt({ hash, confirmations: 0, timeout: 45_000 });
       return rcpt;
     } catch {
-      append("⏳ Still pending… you can keep playing; it should confirm shortly.");
+      append("⏳ Still pending… you can safely close this panel; life will be added once it confirms.");
       return null;
     }
   }
-  function onSuccess(addr?: string) {
-    window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address: addr || address } }));
-  }
 
-  /* ===== ID-less path (ERC-721 Enumerable) ===== */
+  // One-click via Enumerable (first token)
   async function sendEnumerableFirst() {
     if (!isConnected || VAULT === zeroAddress || !address) return;
     setBusy(true); setLog(""); setTx(null);
@@ -154,177 +158,235 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     try {
       try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {}
 
-      // 1) Must be ERC-721 and support Enumerable
-      if (std !== "ERC721" || !enumSupported) {
-        append("This collection is not ERC-721 Enumerable. Use 'ERC-721: send by tokenId'.");
-        setBusy(false);
-        return;
-      }
+      append("🔎 Checking ERC721Enumerable support...");
+      const tokenId = await readContract(cfg, {
+        abi: ERC721_READ_ABI, address: ALLOWED_CONTRACT,
+        functionName: "tokenOfOwnerByIndex", args: [address, 0n], chainId: MONAD_CHAIN_ID,
+      });
 
-      // 2) Quick check: do you own anything?
+      append(`✅ Found tokenId=${tokenId.toString()} — sending to vault...`);
+      const { hash } = await writeContract(cfg, {
+        abi: ERC721_WRITE_ABI, address: ALLOWED_CONTRACT,
+        functionName: "safeTransferFrom",
+        args: [address, VAULT, BigInt(tokenId as any)],
+        account: address, chainId: MONAD_CHAIN_ID,
+      });
+      setTx(hash);
+      setBusy(false);
+      const rcpt = await waitReceipt(hash);
+      if (rcpt && rcpt.status === "success") onSuccess(address);
+    } catch (e: any) {
+      append(`❌ ${e?.shortMessage || e?.message || String(e)}`);
+      setBusy(false);
+    }
+  }
+
+  // Manual send for 721 by ID (guard 0..10000)
+  async function send721ById() {
+    if (!isConnected || VAULT === zeroAddress || !address) return;
+    const idNum = Number(manualId721);
+    if (!Number.isFinite(idNum) || idNum < 0 || idNum > 10000) { append("⚠️ Enter valid 721 id in 0..10000"); return; }
+
+    setBusy(true); setLog(""); setTx(null);
+    try {
+      try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {}
+      append(`🚀 Sending ERC-721 #${idNum} to vault...`);
+      const { hash } = await writeContract(cfg, {
+        abi: ERC721_WRITE_ABI, address: ALLOWED_CONTRACT,
+        functionName: "safeTransferFrom",
+        args: [address, VAULT, BigInt(idNum)],
+        account: address, chainId: MONAD_CHAIN_ID,
+      });
+      setTx(hash);
+      setBusy(false);
+      const rcpt = await waitReceipt(hash);
+      if (rcpt && rcpt.status === "success") onSuccess(address);
+    } catch (e: any) {
+      append(`❌ ${e?.shortMessage || e?.message || String(e)}`);
+      setBusy(false);
+    }
+  }
+
+  // Manual send for 1155 by ID (1 unit, guard 0..10000 and balance > 0)
+  async function send1155ById() {
+    if (!isConnected || VAULT === zeroAddress || !address) return;
+    const idNum = Number(manualId1155);
+    if (!Number.isFinite(idNum) || idNum < 0 || idNum > 10000) { append("⚠️ Enter valid 1155 id in 0..10000"); return; }
+
+    setBusy(true); setLog(""); setTx(null);
+    try {
+      try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {}
       const bal = await readContract(cfg, {
-        abi: ERC721_READ_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "balanceOf", args: [address as `0x${string}`], chainId: MONAD_CHAIN_ID,
+        abi: ERC1155_ABI, address: ALLOWED_CONTRACT,
+        functionName: "balanceOf", args: [address, BigInt(idNum)], chainId: MONAD_CHAIN_ID,
       }) as bigint;
+      if ((bal ?? 0n) <= 0n) { append("⚠️ You do not own this 1155 id."); setBusy(false); return; }
 
-      if (bal === 0n) {
-        append("No owned token in this collection.");
-        setBusy(false);
-        return;
+      append(`🚀 Sending ERC-1155 #${idNum} (1 unit) to vault...`);
+      const { hash } = await writeContract(cfg, {
+        abi: ERC1155_ABI, address: ALLOWED_CONTRACT,
+        functionName: "safeTransferFrom",
+        args: [address, VAULT, BigInt(idNum), 1n, "0x"],
+        account: address, chainId: MONAD_CHAIN_ID,
+      });
+      setTx(hash);
+      setBusy(false);
+      const rcpt = await waitReceipt(hash);
+      if (rcpt && rcpt.status === "success") onSuccess(address);
+    } catch (e: any) {
+      append(`❌ ${e?.shortMessage || e?.message || String(e)}`);
+      setBusy(false);
+    }
+  }
+
+  // Bounded scan 0..10000 for non-Enumerable 721
+  async function scanAndSendFirstOwned() {
+    if (!isConnected || VAULT === zeroAddress || !address) return;
+    let from = Math.max(0, Math.floor(Number(scanFrom) || 0));
+    let to = Math.min(10000, Math.floor(Number(scanTo) || 0));
+    if (to < from) [from, to] = [to, from];
+
+    setBusy(true); setLog(""); setTx(null);
+    cancelRef.current = false;
+
+    try {
+      try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {}
+      append(`🔎 Scanning ownerOf(id) from ${from} to ${to}...`);
+      const chunk = 20; // small chunk to avoid RPC flood
+      for (let i = from; i <= to; i += chunk) {
+        if (cancelRef.current) { append("⛔️ Scan canceled."); setBusy(false); return; }
+        const end = Math.min(to, i + chunk - 1);
+        // sequential reads for stability
+        for (let id = i; id <= end; id++) {
+          try {
+            const owner = await readContract(cfg, {
+              abi: ERC721_READ_ABI, address: ALLOWED_CONTRACT,
+              functionName: "ownerOf", args: [BigInt(id)], chainId: MONAD_CHAIN_ID,
+            }) as Address;
+            if (owner?.toLowerCase() === address.toLowerCase()) {
+              append(`✅ Found owned tokenId=${id}; sending...`);
+              const { hash } = await writeContract(cfg, {
+                abi: ERC721_WRITE_ABI, address: ALLOWED_CONTRACT,
+                functionName: "safeTransferFrom",
+                args: [address, VAULT, BigInt(id)],
+                account: address, chainId: MONAD_CHAIN_ID,
+              });
+              setTx(hash);
+              setBusy(false);
+              const rcpt = await waitReceipt(hash);
+              if (rcpt && rcpt.status === "success") onSuccess(address);
+              return;
+            }
+          } catch (e: any) {
+            // ownerOf may revert for non-existent ids; ignore
+          }
+        }
+        append(`… scanned up to #${end}`);
       }
-
-      // 3) Get the first token id
-      const id0 = await readContract(cfg, {
-        abi: ERC721_READ_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "tokenOfOwnerByIndex",
-        args: [address as `0x${string}`, 0n],
-        chainId: MONAD_CHAIN_ID,
-      }) as bigint;
-
-      // 4) Transfer it
-      const hash = await writeContract(cfg, {
-        abi: ERC721_WRITE_ABI,
-        address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "safeTransferFrom",
-        args: [address, VAULT as `0x${string}`, id0],
-        account: address, chainId: MONAD_CHAIN_ID,
-      });
-      setTx(hash);
+      append("😕 No owned token found in the specified range.");
       setBusy(false);
-
-      waitReceipt(hash).then((rcpt) => {
-        if (rcpt && rcpt.status === "success") onSuccess(address);
-      });
-    } catch (e:any) {
+    } catch (e: any) {
+      append(`❌ ${e?.shortMessage || e?.message || String(e)}`);
       setBusy(false);
-      append(e?.shortMessage || e?.message || "send failed");
     }
   }
 
-  /* ===== Manual paths ===== */
-  async function sendErc721ById(idNum: number) {
-    if (!isConnected || VAULT === zeroAddress || !address) return;
-    setBusy(true); setLog(""); setTx(null);
-    try {
-      try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {}
-      const hash = await writeContract(cfg, {
-        abi: ERC721_WRITE_ABI,
-        address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "safeTransferFrom",
-        args: [address, VAULT as `0x${string}`, BigInt(idNum)],
-        account: address, chainId: MONAD_CHAIN_ID,
-      });
-      setTx(hash);
-      setBusy(false);
-      waitReceipt(hash).then((rcpt) => {
-        if (rcpt && rcpt.status === "success") onSuccess(address);
-      });
-    } catch (e:any) {
-      setBusy(false);
-      append(e?.shortMessage || e?.message || "send failed");
-    }
-  }
+  function cancelScan() { cancelRef.current = true; }
 
-  async function sendErc1155ById(idNum: number) {
-    if (!isConnected || VAULT === zeroAddress || !address) return;
-    setBusy(true); setLog(""); setTx(null);
-    try {
-      try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {}
-      const hash = await writeContract(cfg, {
-        abi: ERC1155_ABI,
-        address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "safeTransferFrom",
-        args: [address, VAULT as `0x${string}`, BigInt(idNum), 1n, "0x"],
-        account: address, chainId: MONAD_CHAIN_ID,
-      });
-      setTx(hash);
-      setBusy(false);
-      waitReceipt(hash).then((rcpt) => {
-        if (rcpt && rcpt.status === "success") onSuccess(address);
-      });
-    } catch (e:any) {
-      setBusy(false);
-      append(e?.shortMessage || e?.message || "send failed");
-    }
-  }
-
-  /* ===== UI ===== */
-  const txLink = tx && EXPLORER ? `${EXPLORER.replace(/\/+$/, "")}/tx/${tx}` : null;
+  const needsSwitch = isConnected && chainId !== MONAD_CHAIN_ID;
+  const disabled = !canSend || busy;
 
   if (mode === "cta") {
     return (
-      <div style={{ display:"grid", placeItems:"center", marginTop:8 }}>
-        <button className="btn btn-primary btn-lg" onClick={sendEnumerableFirst} disabled={!canSend || busy}>
-          {busy ? "Sending…" : "1 NFT = 1 life"}
+      <div className="p-2 rounded-xl border border-gray-700 bg-black/40 text-sm">
+        <div className="font-semibold mb-2">Send NFT to Vault</div>
+        <button disabled={disabled || !enumSupported} onClick={sendEnumerableFirst}
+                className="px-3 py-2 rounded-lg bg-white/10 hover:bg-white/15 disabled:opacity-50">
+          One‑click (ERC721Enumerable)
         </button>
-        {tx && (
-          <div className="muted" style={{ marginTop: 8 }}>
-            Tx: <code>{tx}</code>{txLink ? <> • <a href={txLink} target="_blank" rel="noreferrer">Open in explorer</a></> : null}
-          </div>
+        {enumSupported === false && (
+          <div className="mt-2 text-xs opacity-80">Enumerable not available. Use manual ID or scan.</div>
         )}
-        {log && <div className="log" style={{marginTop:12}}><pre>{log}</pre></div>}
       </div>
     );
   }
 
   return (
-    <div className="mx-auto mt-6 max-w-3xl rounded-2xl card">
-      <div className="mb-2 text-sm muted">
-        Vault: <span className="font-mono">{VAULT}</span>
-      </div>
-      <div className="mb-2 text-sm muted">
-        Allowed: <span className="font-mono">{ALLOWED_CONTRACT}</span>
+    <div className="p-3 rounded-2xl border border-gray-700 bg-black/40 text-sm max-w-[560px]">
+      <div className="flex items-center justify-between mb-2">
+        <div className="font-semibold">Vault</div>
+        <div className="opacity-70">Chain: {MONAD_CHAIN_ID}</div>
       </div>
 
-      <div className="mb-2 text-xs muted">
-        Standard: <b>{std}</b>{' '}
-        {std === "ERC721" && (
-          <>• Enumerable: <b>{enumSupported === null ? "—" : enumSupported ? "yes" : "no"}</b></>
-        )}
+      <div className="mb-2">
+        <div className="opacity-80">Collection</div>
+        <div className="text-xs break-all font-mono">{ALLOWED_CONTRACT}</div>
+        <div className="mt-1 text-xs">Std: <b>{std}</b> {enumSupported === null ? "" : enumSupported ? "(Enumerable ✓)" : "(Enumerable ✗)"}</div>
       </div>
 
-      <div className="mb-3 text-lg card-title">Send 1 NFT to Vault → get 1 life</div>
+      <div className="mb-3">
+        <button disabled={disabled || !enumSupported} onClick={sendEnumerableFirst}
+                className="px-3 py-2 rounded-lg bg-white/10 hover:bg-white/15 disabled:opacity-50">
+          One‑click send (Enumerable)
+        </button>
+        {!enumSupported && <div className="mt-1 text-xs opacity-80">Enumerable not available — use manual or scan.</div>}
+      </div>
 
-      {/* ID-less path for ERC-721 Enumerable */}
-      <button className="btn btn-primary" disabled={!canSend || busy} onClick={sendEnumerableFirst}>
-        {busy ? "Sending…" : "Send automatically (ERC-721 enumerable)"}
-      </button>
-
-      {/* Manual lanes */}
-      <div className="mt-3" style={{ display:"grid", gap:8, gridTemplateColumns:"1fr 1fr" }}>
-        <div className="card" style={{ padding: 8 }}>
-          <div className="mb-2" style={{ fontWeight: 600 }}>ERC-721: send by tokenId</div>
-          <div style={{ display:"flex", gap:8 }}>
-            <input className="input" type="number" placeholder="tokenId (0…9999)"
-                   value={manualId721} onChange={(e)=>setManualId721(e.target.value)} />
-            <button className="btn" disabled={!manualId721 || busy} onClick={()=>sendErc721ById(Number(manualId721))}>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="p-2 rounded-xl border border-gray-700">
+          <div className="font-medium mb-1">Manual 721</div>
+          <div className="flex gap-2">
+            <input inputMode="numeric" pattern="[0-9]*" placeholder="id (0..10000)"
+                   value={manualId721} onChange={(e)=>setManualId721(e.target.value.replace(/[^0-9]/g,''))}
+                   className="px-2 py-1 rounded-md bg-black/30 border border-gray-700 w-full" />
+            <button disabled={disabled || std!=="ERC721"} onClick={send721ById}
+                    className="px-3 py-1.5 rounded-md bg-white/10 hover:bg-white/15 disabled:opacity-50">
               Send
             </button>
           </div>
         </div>
-        <div className="card" style={{ padding: 8 }}>
-          <div className="mb-2" style={{ fontWeight: 600 }}>ERC-1155: send by id</div>
-          <div style={{ display:"flex", gap:8 }}>
-            <input className="input" type="number" placeholder="id"
-                   value={manualId1155} onChange={(e)=>setManualId1155(e.target.value)} />
-            <button className="btn" disabled={!manualId1155 || busy} onClick={()=>sendErc1155ById(Number(manualId1155))}>
+
+        <div className="p-2 rounded-xl border border-gray-700">
+          <div className="font-medium mb-1">Manual 1155</div>
+          <div className="flex gap-2">
+            <input inputMode="numeric" pattern="[0-9]*" placeholder="id (0..10000)"
+                   value={manualId1155} onChange={(e)=>setManualId1155(e.target.value.replace(/[^0-9]/g,''))}
+                   className="px-2 py-1 rounded-md bg-black/30 border border-gray-700 w-full" />
+            <button disabled={disabled || std!=="ERC1155"} onClick={send1155ById}
+                    className="px-3 py-1.5 rounded-md bg-white/10 hover:bg-white/15 disabled:opacity-50">
               Send
             </button>
           </div>
         </div>
       </div>
 
-      {tx && (
-        <div className="muted" style={{ marginTop: 8 }}>
-          Tx: <code>{tx}</code>{txLink ? <> • <a href={txLink} target="_blank" rel="noreferrer">Open in explorer</a></> : null}
+      <div className="mt-3 p-2 rounded-xl border border-gray-700">
+        <div className="font-medium mb-1">Scan (non‑Enumerable 721)</div>
+        <div className="text-xs opacity-80 mb-1">Checks ownerOf(id) in a safe range and sends the first found.</div>
+        <div className="flex items-center gap-2">
+          <input inputMode="numeric" pattern="[0-9]*" value={scanFrom} onChange={(e)=>setScanFrom(e.target.value.replace(/[^0-9]/g,''))}
+                 className="px-2 py-1 rounded-md bg-black/30 border border-gray-700 w-24" placeholder="from" />
+          <span>…</span>
+          <input inputMode="numeric" pattern="[0-9]*" value={scanTo} onChange={(e)=>setScanTo(e.target.value.replace(/[^0-9]/g,''))}
+                 className="px-2 py-1 rounded-md bg-black/30 border border-gray-700 w-24" placeholder="to" />
+          <button disabled={disabled || std!=="ERC721"} onClick={scanAndSendFirstOwned}
+                  className="px-3 py-1.5 rounded-md bg-white/10 hover:bg-white/15 disabled:opacity-50">
+            Scan & Send
+          </button>
+          <button disabled={!busy} onClick={cancelScan}
+                  className="px-3 py-1.5 rounded-md bg-white/10 hover:bg-white/15 disabled:opacity-50">
+            Cancel
+          </button>
         </div>
-      )}
+      </div>
+
       <div className="mt-3 log">
         <div className="mb-1" style={{fontWeight:600}}>Log</div>
         <pre>{log || "—"}</pre>
       </div>
 
       <div className="mt-1 text-sm">Lives: <span className="font-semibold">{lives}</span></div>
+      {tx && <div className="mt-1 text-xs break-all">Tx: <span className="font-mono">{tx}</span></div>}
     </div>
   );
 }
