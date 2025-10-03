@@ -5,13 +5,12 @@ import { zeroAddress } from "viem";
 import { useAccount, useConfig, useSwitchChain } from "wagmi";
 import { readContract, writeContract, getPublicClient } from "@wagmi/core";
 
-/** VaultPanel (BlockVision instant lookup + throttled; safe on-chain fallback)
- * - Indexer-first: fetch owned NFTs from BlockVision (key-in-URL in VITE_BV_HTTP).
- * - Throttled (single-flight + cooldown) to avoid 429.
- * - Local cache per address+contract for snappy revisits.
- * - Optional on-chain fallback for ERC-721 (can be disabled via Speed mode).
- * - Manual send by ID (ERC-721/1155).
- * - Emits "wg:nft-confirmed" on success (your game listens to it).
+/** VaultPanel (ID-less path for ERC-721 Enumerable)
+ * - No indexer. No scanning. Minimal RPC calls.
+ * - If collection supports ERC721Enumerable, grab tokenId via tokenOfOwnerByIndex(owner, 0)
+ *   and send it to VAULT in one click (no ID input).
+ * - Fallback: manual send by tokenId (ERC-721) or by id (ERC-1155).
+ * - Emits "wg:nft-confirmed" on success (the game listens to it).
  * - Public API unchanged: <VaultPanel mode="full" | "cta" />
  */
 
@@ -21,25 +20,9 @@ export default function VaultPanel({ mode = "full" }: { mode?: "full" | "cta" })
 
 /* ===== ENV / CONSTS ===== */
 const MONAD_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
-const ALLOWED_CONTRACT = "0x88c78d5852f45935324c6d100052958f694e8446"; // allowed collection
+const ALLOWED_CONTRACT = "0x88c78d5852f45935324c6d100052958f694e8446"; // your collection
 const VAULT = (import.meta.env.VITE_VAULT_ADDRESS as string) || zeroAddress;
-
-// BlockVision (key-in-URL) base; e.g. https://monad-testnet.blockvision.org/v1/<KEY>
-const BV_HTTP = (import.meta.env.VITE_BV_HTTP as string | undefined)?.replace(/\/+$/, "") || "";
-
-// Optional explorer for tx links
 const EXPLORER = (import.meta.env.VITE_EXPLORER_URL as string | undefined) || "";
-
-/* ---- Probe tuning (fallback only; indexer is primary) ---- */
-const DEFAULT_TOP_GUESS = 10_000; // you said there are 10k ids
-const BATCH_SIZE = 24;            // parallel calls per batch
-
-/* ---- Indexer throttling (prevent 429) ---- */
-const INDEXER_MIN_COOLDOWN_MS = 15_000; // minimal delay between attempts
-
-// Single-flight holders (module-level)
-const _inflightByKey = new Map<string, Promise<IndexedToken[] | null>>();
-const _lastFetchAtByKey = new Map<string, number>();
 
 /* ===== ABIs ===== */
 const ERC165_ABI = [
@@ -90,24 +73,6 @@ const getLives = (cid:number, addr?:string|null) => {
 };
 
 type Std = "ERC721" | "ERC1155" | "UNKNOWN";
-type IndexedToken = { standard: "ERC721" | "ERC1155"; tokenId: bigint };
-
-/* ===== Small helpers ===== */
-function sleep(ms:number){ return new Promise(r=>setTimeout(r,ms)); }
-function range(start: number, end: number, step = 1): number[] {
-  const out: number[] = [];
-  if (step > 0) for (let i = start; i <= end; i += step) out.push(i);
-  else for (let i = start; i >= end; i += step) out.push(i);
-  return out;
-}
-function chunk<T>(arr: T[], sz: number): T[][] {
-  const res: T[][] = [];
-  for (let i = 0; i < arr.length; i += sz) res.push(arr.slice(i, i + sz));
-  return res;
-}
-function bvCacheKey(addr: string) {
-  return `wg_bv_cache_${MONAD_CHAIN_ID}_${ALLOWED_CONTRACT.toLowerCase()}_${addr.toLowerCase()}`;
-}
 
 function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
   const cfg = useConfig();
@@ -116,26 +81,15 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
   const { switchChain } = useSwitchChain();
 
   const [std, setStd] = useState<Std>("UNKNOWN");
+  const [enumSupported, setEnumSupported] = useState<boolean | null>(null);
   const [log, setLog] = useState("");
   const [busy, setBusy] = useState(false);
   const [tx, setTx] = useState<`0x${string}` | null>(null);
   const [lives, setLives] = useState(() => getLives(MONAD_CHAIN_ID, address));
 
-  // Manual send inputs
+  // manual inputs
   const [manualId721, setManualId721] = useState<string>("");
   const [manualId1155, setManualId1155] = useState<string>("");
-
-  // Cached list from indexer
-  const [indexed, setIndexed] = useState<IndexedToken[] | null>(null);
-
-  // Speed mode: skip on-chain fallback if indexer is empty
-  const SPEED_MODE_KEY = "wg_speed_mode_v1";
-  const [speedMode, setSpeedMode] = useState<boolean>(() => {
-    try { return localStorage.getItem(SPEED_MODE_KEY) === "1"; } catch { return true; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem(SPEED_MODE_KEY, speedMode ? "1" : "0"); } catch {}
-  }, [speedMode]);
 
   function append(s: string) { setLog((p) => (p ? p + "\n" : "") + s); }
   const canSend = isConnected && VAULT !== zeroAddress;
@@ -147,12 +101,11 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     return () => window.removeEventListener("wg:lives-changed", onLives as any);
   }, [address]);
 
-  // Detect token standard (cheap, parallel)
+  // Detect token standards and enumerable support (only 2 cheap calls)
   useEffect(() => {
     (async () => {
       try {
-        setStd("UNKNOWN");
-        const [is721, is1155] = await Promise.all([
+        const [is721, is1155, isEnum] = await Promise.all([
           readContract(cfg, {
             abi: ERC165_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
             functionName: "supportsInterface", args: [IFACE_ERC721 as `0x${string}`], chainId: MONAD_CHAIN_ID,
@@ -161,219 +114,27 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
             abi: ERC165_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
             functionName: "supportsInterface", args: [IFACE_ERC1155 as `0x${string}`], chainId: MONAD_CHAIN_ID,
           }).catch(()=>false),
+          readContract(cfg, {
+            abi: ERC165_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
+            functionName: "supportsInterface", args: [IFACE_ERC721_ENUM as `0x${string}`], chainId: MONAD_CHAIN_ID,
+          }).catch(()=>false),
         ]);
         if (is721) setStd("ERC721");
         else if (is1155) setStd("ERC1155");
         else setStd("UNKNOWN");
-      } catch { setStd("UNKNOWN"); }
+        setEnumSupported(Boolean(is721 && isEnum));
+      } catch {
+        setStd("UNKNOWN");
+        setEnumSupported(null);
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ALLOWED_CONTRACT]);
 
-  /* ===== Instant lookup via BlockVision (throttled; cached) ===== */
-  async function fetchFromBlockvision(addr: string): Promise<IndexedToken[] | null> {
-    if (!BV_HTTP) return null;
-    const url = `${BV_HTTP}/account/nfts?address=${addr}&pageIndex=1&verified=false&unknown=true`;
-    const cacheK = bvCacheKey(addr);
-
-    // Serve from cache if present (fast path)
-    try {
-      const raw = localStorage.getItem(cacheK);
-      if (raw) {
-        const arr = JSON.parse(raw) as { s: "721" | "1155"; id: string }[];
-        if (Array.isArray(arr) && arr.length) {
-          return arr.map(x => ({ standard: x.s === "1155" ? "ERC1155" : "ERC721", tokenId: BigInt(x.id) }));
-        }
-      }
-    } catch {}
-
-    // Minimal cooldown between attempts
-    const now = Date.now();
-    const last = _lastFetchAtByKey.get(cacheK) ?? 0;
-    if (now - last < INDEXER_MIN_COOLDOWN_MS) {
-      return null;
-    }
-
-    // Single-flight: reuse ongoing promise
-    if (_inflightByKey.has(cacheK)) {
-      try { return await _inflightByKey.get(cacheK)!; } catch { /* fallthrough */ }
-    }
-
-    const p = (async () => {
-      _lastFetchAtByKey.set(cacheK, Date.now());
-      let res: Response | null = null;
-      try {
-        res = await fetch(url, { headers: { accept: "application/json" } });
-      } catch {
-        _inflightByKey.delete(cacheK);
-        return null;
-      }
-
-      // Rate-limited handling
-      if (!res.ok) {
-        if (res.status === 429) {
-          const ra = res.headers.get("Retry-After");
-          const waitMs = ra ? Math.max(1000, Number(ra) * 1000) : INDEXER_MIN_COOLDOWN_MS;
-          _lastFetchAtByKey.set(cacheK, Date.now() + waitMs);
-        }
-        _inflightByKey.delete(cacheK);
-        return null;
-      }
-
-      let j: any = null;
-      try { j = await res.json(); } catch {
-        _inflightByKey.delete(cacheK);
-        return null;
-      }
-
-      const cols = j?.result?.data;
-      if (!Array.isArray(cols)) {
-        try { localStorage.setItem(cacheK, "[]"); } catch {}
-        _inflightByKey.delete(cacheK);
-        return [];
-      }
-
-      const out: IndexedToken[] = [];
-      for (const col of cols) {
-        const ca = String(col?.contractAddress || "").toLowerCase();
-        if (ca !== ALLOWED_CONTRACT.toLowerCase()) continue;
-        const std0 = String(col?.ercStandard || "").toUpperCase(); // "ERC721" | "ERC1155"
-        const items = Array.isArray(col?.items) ? col.items : [];
-        for (const it of items) {
-          const idRaw = it?.tokenId ?? it?.token_id ?? it?.id;
-          if (idRaw == null) continue;
-          try { out.push({ standard: (std0 === "ERC1155" ? "ERC1155" : "ERC721"), tokenId: BigInt(String(idRaw)) }); } catch {}
-        }
-        // Only our contract matters
-        break;
-      }
-
-      // Save compact cache (even empty -> avoids re-hammering)
-      try {
-        const compact = out.map(t => ({ s: t.standard === "ERC1155" ? "1155" : "721", id: t.tokenId.toString() }));
-        localStorage.setItem(cacheK, JSON.stringify(compact.slice(0, 64)));
-      } catch {}
-
-      _inflightByKey.delete(cacheK);
-      return out;
-    })();
-
-    _inflightByKey.set(cacheK, p);
-    return p;
-  }
-
-  // Load index on address change (do not refetch if we already have a list)
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      if (!address) { setIndexed(null); return; }
-      if (indexed && indexed.length) return; // already have tokens
-      const list = await fetchFromBlockvision(address);
-      if (!alive) return;
-      if (Array.isArray(list)) setIndexed(list);
-    })();
-    return () => { alive = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [address]);
-
-  /* ===== On-chain fallback (ERC-721 only; optional) ===== */
-  async function supportsEnumerable(): Promise<boolean> {
-    try {
-      return await readContract(cfg, {
-        abi: ERC165_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "supportsInterface", args: [IFACE_ERC721_ENUM as `0x${string}`],
-        chainId: MONAD_CHAIN_ID,
-      }) as boolean;
-    } catch { return false; }
-  }
-  async function balance721Of(user:`0x${string}`): Promise<bigint> {
-    try {
-      return await readContract(cfg, {
-        abi: ERC721_READ_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "balanceOf", args: [user], chainId: MONAD_CHAIN_ID,
-      }) as bigint;
-    } catch { return 0n; }
-  }
-  async function probe721Batch(user: `0x${string}`, ids: number[]): Promise<bigint | null> {
-    // Parallel single calls (no multicall on this chain)
-    const calls = ids.map((id) =>
-      readContract(cfg, {
-        abi: ERC721_READ_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "ownerOf", args: [BigInt(id)], chainId: MONAD_CHAIN_ID,
-      })
-      .then((owner) => ({ ok: true, id, owner: (owner as `0x${string}`).toLowerCase() }))
-      .catch(() => ({ ok: false, id }))
-    );
-    const res = await Promise.allSettled(calls);
-    for (const rr of res) {
-      if (rr.status === "fulfilled" && (rr.value as any).ok) {
-        const v = rr.value as any;
-        if (v.owner === user.toLowerCase()) return BigInt(v.id);
-      }
-    }
-    return null;
-  }
-  async function pickAnyErc721(user: `0x${string}`) {
-    if ((await balance721Of(user)) === 0n) return null;
-
-    // Enumerable shortcut, if available
-    if (await supportsEnumerable()) {
-      try {
-        const id0 = await readContract(cfg, {
-          abi: ERC721_READ_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
-          functionName: "tokenOfOwnerByIndex", args: [user, 0n], chainId: MONAD_CHAIN_ID,
-        }) as bigint;
-        return id0;
-      } catch {}
-    }
-
-    // Modest scan budget (indexer is primary)
-    const cap = 1200;
-    let spent = 0;
-
-    // 0..128
-    {
-      const ids = range(0, 128);
-      const batches = chunk(ids, BATCH_SIZE);
-      for (const b of batches) {
-        const hit = await probe721Batch(user, b);
-        spent += b.length; if (hit !== null) return hit;
-        if (spent >= cap) return null; await sleep(0);
-      }
-    }
-    // top-down near 10k
-    {
-      const remain = cap - spent;
-      const down = Math.max(0, Math.floor(remain * 0.6));
-      const ids = range(DEFAULT_TOP_GUESS - 1, Math.max(0, DEFAULT_TOP_GUESS - down), -1);
-      const batches = chunk(ids, BATCH_SIZE);
-      for (const b of batches) {
-        const hit = await probe721Batch(user, b);
-        spent += b.length; if (hit !== null) return hit;
-        if (spent >= cap) return null; await sleep(0);
-      }
-    }
-    // sparse stride
-    {
-      const remain = cap - spent;
-      if (remain <= 0) return null;
-      const stride = Math.max(1, Math.ceil(DEFAULT_TOP_GUESS / remain));
-      const picks: number[] = [];
-      for (let i = 0; i <= DEFAULT_TOP_GUESS && picks.length < remain; i += stride) picks.push(i);
-      const batches = chunk(picks, BATCH_SIZE);
-      for (const b of batches) {
-        const hit = await probe721Batch(user, b);
-        spent += b.length; if (hit !== null) return hit;
-        if (spent >= cap) return null; await sleep(0);
-      }
-    }
-    return null;
-  }
-
-  /* ===== send + wait receipt (non-blocking UI) ===== */
+  /* ===== Utils ===== */
   async function waitReceipt(hash: `0x${string}`) {
     try {
-      // 0 confirmations -> as soon as it's mined; short timeout for snappy UX
+      // Non-blocking: 0 confirmations, short timeout — feel faster
       const rcpt = await pc.waitForTransactionReceipt({ hash, confirmations: 0, timeout: 45_000 });
       return rcpt;
     } catch {
@@ -381,14 +142,66 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
       return null;
     }
   }
-
-  function onSuccess(addressNow?: string) {
-    // Invalidate index cache and notify the app to grant a life
-    const who = addressNow || address;
-    if (who) { try { localStorage.removeItem(bvCacheKey(who)); } catch {} }
-    window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address: who } }));
+  function onSuccess(addr?: string) {
+    window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address: addr || address } }));
   }
 
+  /* ===== ID-less path (ERC-721 Enumerable) ===== */
+  async function sendEnumerableFirst() {
+    if (!isConnected || VAULT === zeroAddress || !address) return;
+    setBusy(true); setLog(""); setTx(null);
+
+    try {
+      try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {}
+
+      // 1) Must be ERC-721 and support Enumerable
+      if (std !== "ERC721" || !enumSupported) {
+        append("This collection is not ERC-721 Enumerable. Use 'ERC-721: send by tokenId'.");
+        setBusy(false);
+        return;
+      }
+
+      // 2) Quick check: do you own anything?
+      const bal = await readContract(cfg, {
+        abi: ERC721_READ_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
+        functionName: "balanceOf", args: [address as `0x${string}`], chainId: MONAD_CHAIN_ID,
+      }) as bigint;
+
+      if (bal === 0n) {
+        append("No owned token in this collection.");
+        setBusy(false);
+        return;
+      }
+
+      // 3) Get the first token id
+      const id0 = await readContract(cfg, {
+        abi: ERC721_READ_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
+        functionName: "tokenOfOwnerByIndex",
+        args: [address as `0x${string}`, 0n],
+        chainId: MONAD_CHAIN_ID,
+      }) as bigint;
+
+      // 4) Transfer it
+      const hash = await writeContract(cfg, {
+        abi: ERC721_WRITE_ABI,
+        address: ALLOWED_CONTRACT as `0x${string}`,
+        functionName: "safeTransferFrom",
+        args: [address, VAULT as `0x${string}`, id0],
+        account: address, chainId: MONAD_CHAIN_ID,
+      });
+      setTx(hash);
+      setBusy(false);
+
+      waitReceipt(hash).then((rcpt) => {
+        if (rcpt && rcpt.status === "success") onSuccess(address);
+      });
+    } catch (e:any) {
+      setBusy(false);
+      append(e?.shortMessage || e?.message || "send failed");
+    }
+  }
+
+  /* ===== Manual paths ===== */
   async function sendErc721ById(idNum: number) {
     if (!isConnected || VAULT === zeroAddress || !address) return;
     setBusy(true); setLog(""); setTx(null);
@@ -402,7 +215,7 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
         account: address, chainId: MONAD_CHAIN_ID,
       });
       setTx(hash);
-      setBusy(false); // unlock UI immediately
+      setBusy(false);
       waitReceipt(hash).then((rcpt) => {
         if (rcpt && rcpt.status === "success") onSuccess(address);
       });
@@ -435,87 +248,13 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     }
   }
 
-  /* ===== main flow: indexer-first, then optional fallback ===== */
-  async function sendOne() {
-    if (!isConnected || VAULT === zeroAddress || !address) return;
-    setBusy(true); setLog(""); setTx(null);
-
-    try {
-      try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {}
-
-      // 1) Indexer-first (instant)
-      let list = indexed;
-      if (!list) list = await fetchFromBlockvision(address);
-      if (list && list.length) {
-        const pick = list.find(t => t.standard === "ERC721") ?? list.find(t => t.standard === "ERC1155");
-        if (pick) {
-          if (pick.standard === "ERC721") {
-            const hash = await writeContract(cfg, {
-              abi: ERC721_WRITE_ABI,
-              address: ALLOWED_CONTRACT as `0x${string}`,
-              functionName: "safeTransferFrom",
-              args: [address, VAULT as `0x${string}`, pick.tokenId],
-              account: address, chainId: MONAD_CHAIN_ID,
-            });
-            setTx(hash);
-            setBusy(false);
-            waitReceipt(hash).then((rcpt) => {
-              if (rcpt && rcpt.status === "success") onSuccess(address);
-            });
-            return;
-          } else {
-            const hash = await writeContract(cfg, {
-              abi: ERC1155_ABI,
-              address: ALLOWED_CONTRACT as `0x${string}`,
-              functionName: "safeTransferFrom",
-              args: [address, VAULT as `0x${string}`, pick.tokenId, 1n, "0x"],
-              account: address, chainId: MONAD_CHAIN_ID,
-            });
-            setTx(hash);
-            setBusy(false);
-            waitReceipt(hash).then((rcpt) => {
-              if (rcpt && rcpt.status === "success") onSuccess(address);
-            });
-            return;
-          }
-        }
-      }
-
-      // 2) Optional on-chain fallback (ERC-721)
-      if (!speedMode) {
-        const id = await pickAnyErc721(address as `0x${string}`);
-        if (id !== null) {
-          const hash = await writeContract(cfg, {
-            abi: ERC721_WRITE_ABI,
-            address: ALLOWED_CONTRACT as `0x${string}`,
-            functionName: "safeTransferFrom",
-            args: [address, VAULT as `0x${string}`, id],
-            account: address, chainId: MONAD_CHAIN_ID,
-          });
-          setTx(hash);
-          setBusy(false);
-          waitReceipt(hash).then((rcpt) => {
-            if (rcpt && rcpt.status === "success") onSuccess(address);
-          });
-          return;
-        }
-      }
-
-      append("No owned NFT found via indexer. Use 'send by tokenId' (ERC-721) or 'send by id' (ERC-1155).");
-      setBusy(false);
-    } catch (e:any) {
-      setBusy(false);
-      append(e?.shortMessage || e?.message || "send failed");
-    }
-  }
-
   /* ===== UI ===== */
   const txLink = tx && EXPLORER ? `${EXPLORER.replace(/\/+$/, "")}/tx/${tx}` : null;
 
   if (mode === "cta") {
     return (
       <div style={{ display:"grid", placeItems:"center", marginTop:8 }}>
-        <button className="btn btn-primary btn-lg" onClick={sendOne} disabled={!canSend || busy}>
+        <button className="btn btn-primary btn-lg" onClick={sendEnumerableFirst} disabled={!canSend || busy}>
           {busy ? "Sending…" : "1 NFT = 1 life"}
         </button>
         {tx && (
@@ -537,29 +276,21 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
         Allowed: <span className="font-mono">{ALLOWED_CONTRACT}</span>
       </div>
 
-      {BV_HTTP ? (
-        <div className="mb-2 text-xs muted">
-          Indexer: <span className="font-mono">{BV_HTTP}/account/nfts</span> (instant lookup, throttled)
-        </div>
-      ) : (
-        <div className="mb-2 text-xs" style={{ color: "#ffb86b" }}>
-          No BlockVision endpoint (VITE_BV_HTTP). Falling back to on-chain probe.
-        </div>
-      )}
-
-      <div className="mb-2 text-xs muted" style={{display:"flex", gap:8, alignItems:"center"}}>
-        <label style={{display:"flex", gap:6, alignItems:"center", cursor:"pointer"}}>
-          <input type="checkbox" checked={speedMode} onChange={(e)=>setSpeedMode(e.target.checked)} />
-          Speed mode (skip on-chain fallback)
-        </label>
+      <div className="mb-2 text-xs muted">
+        Standard: <b>{std}</b>{' '}
+        {std === "ERC721" && (
+          <>• Enumerable: <b>{enumSupported === null ? "—" : enumSupported ? "yes" : "no"}</b></>
+        )}
       </div>
 
       <div className="mb-3 text-lg card-title">Send 1 NFT to Vault → get 1 life</div>
-      <button className="btn btn-primary" disabled={!canSend || busy} onClick={sendOne}>
-        {busy ? "Sending…" : "Send automatically"}
+
+      {/* ID-less path for ERC-721 Enumerable */}
+      <button className="btn btn-primary" disabled={!canSend || busy} onClick={sendEnumerableFirst}>
+        {busy ? "Sending…" : "Send automatically (ERC-721 enumerable)"}
       </button>
 
-      {/* Manual ID lane (instant path; avoids scan) */}
+      {/* Manual lanes */}
       <div className="mt-3" style={{ display:"grid", gap:8, gridTemplateColumns:"1fr 1fr" }}>
         <div className="card" style={{ padding: 8 }}>
           <div className="mb-2" style={{ fontWeight: 600 }}>ERC-721: send by tokenId</div>
@@ -592,15 +323,6 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
         <div className="mb-1" style={{fontWeight:600}}>Log</div>
         <pre>{log || "—"}</pre>
       </div>
-
-      {/* Optional: show what indexer returned (for quick debugging) */}
-      {indexed && (
-        <div className="mt-3 text-xs">
-          Indexed: {indexed.length
-            ? indexed.map(t => `${t.standard}:${t.tokenId.toString()}`).join(", ")
-            : "none"}
-        </div>
-      )}
 
       <div className="mt-1 text-sm">Lives: <span className="font-semibold">{lives}</span></div>
     </div>
