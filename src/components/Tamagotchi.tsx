@@ -155,6 +155,8 @@ export default function Tamagotchi({
   const [lifeSpentForThisDeath, setLifeSpentForThisDeath] = useState<boolean>(false);
 
   const [anim, setAnim] = useState<AnimKey>("walk");
+  // Mini-game modal state
+  const [showGame, setShowGame] = useState(false);
   const [lastHealAt, setLastHealAt] = useState<number>(0);
 
   // food
@@ -456,7 +458,13 @@ export default function Tamagotchi({
     },
     play: () => {
       if (isDead) return;
-      setStats((s) => clampStats({ ...s, happiness: s.happiness + 0.2, health: Math.min(1, s.health + 0.03) }));
+      const globalRender = (window as any).__wgRenderGame;
+      if (typeof renderGame === "function" || typeof globalRender === "function") {
+        setShowGame(true);
+      } else {
+        // Fallback to legacy behavior to avoid breaking existing flows
+        setStats((s) => clampStats({ ...s, happiness: s.happiness + 0.2, health: Math.min(1, s.health + 0.03) }));
+      }
     },
     clean: () => {
       if (!canClean) return;
@@ -1006,6 +1014,30 @@ if (!deadRef.current && sleepingNow) {
           <span className="muted">Sleep window locked</span>
         )}
       </div>
+
+      {/* Mini-game modal (opens if renderGame prop or global renderer is provided) */}
+      {showGame && (
+        <div className="modal" onClick={() => setShowGame(false)} style={{ zIndex: 9999 }}>
+          <div
+            className="card"
+            style={{ width: 760, maxWidth: "92vw", maxHeight: "90vh", overflow: "auto" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+              <div style={{ fontSize: 16 }}>Mini-game</div>
+              <button className="btn" onClick={() => setShowGame(false)}>✕</button>
+            </div>
+            <div style={{ borderRadius: 12, overflow: "hidden" }}>
+              {typeof renderGame === "function"
+                ? renderGame()
+                : (typeof (window as any).__wgRenderGame === "function"
+                    ? (window as any).__wgRenderGame()
+                    : null)}
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
@@ -1181,6 +1213,30 @@ function Bar({ label, value, h = 6 }: { label: string; value: number; h?: number
       <div style={{ height: h, width: "100%", borderRadius: Math.max(6, h), background: "rgba(255,255,255,0.08)", overflow: "hidden" }}>
         <div style={{ width: `${pct}%`, height: "100%", background: "linear-gradient(90deg, rgba(124,77,255,0.9), rgba(0,200,255,0.9))" }} />
       </div>
+
+      {/* Mini-game modal (opens if renderGame prop or global renderer is provided) */}
+      {showGame && (
+        <div className="modal" onClick={() => setShowGame(false)} style={{ zIndex: 9999 }}>
+          <div
+            className="card"
+            style={{ width: 760, maxWidth: "92vw", maxHeight: "90vh", overflow: "auto" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+              <div style={{ fontSize: 16 }}>Mini-game</div>
+              <button className="btn" onClick={() => setShowGame(false)}>✕</button>
+            </div>
+            <div style={{ borderRadius: 12, overflow: "hidden" }}>
+              {typeof renderGame === "function"
+                ? renderGame()
+                : (typeof (window as any).__wgRenderGame === "function"
+                    ? (window as any).__wgRenderGame()
+                    : null)}
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
@@ -1190,6 +1246,30 @@ function OverlayCard({ children }: { children: React.ReactNode }) {
       <div className="card" style={{ padding: 14, borderRadius: 12, minWidth: 260, textAlign: "center", background: "rgba(10,10,18,0.85)", border: "1px solid rgba(255,255,255,0.12)" }}>
         {children}
       </div>
+
+      {/* Mini-game modal (opens if renderGame prop or global renderer is provided) */}
+      {showGame && (
+        <div className="modal" onClick={() => setShowGame(false)} style={{ zIndex: 9999 }}>
+          <div
+            className="card"
+            style={{ width: 760, maxWidth: "92vw", maxHeight: "90vh", overflow: "auto" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+              <div style={{ fontSize: 16 }}>Mini-game</div>
+              <button className="btn" onClick={() => setShowGame(false)}>✕</button>
+            </div>
+            <div style={{ borderRadius: 12, overflow: "hidden" }}>
+              {typeof renderGame === "function"
+                ? renderGame()
+                : (typeof (window as any).__wgRenderGame === "function"
+                    ? (window as any).__wgRenderGame()
+                    : null)}
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
