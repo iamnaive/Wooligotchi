@@ -266,7 +266,7 @@ function AppInner() {
           <div className="splash-inner">
             <div className="splash-title">Wooligotchi</div>
             <div className="muted">Send 1 NFT → get 1 life</div>
-            <VaultPanel mode="cta" />
+            <VaultPanel />
           </div>
         </section>
       )}
@@ -330,7 +330,7 @@ function AppInner() {
         <div className="modal" onClick={() => setVaultModal(false)}>
           <div className="card" style={{ width: 520, maxWidth: "92vw" }} onClick={(e)=>e.stopPropagation()}>
             <div className="title" style={{ fontSize: 18, marginBottom: 8 }}>1 NFT → +1 life</div>
-            <VaultPanel mode="cta" />
+            <VaultPanel />
             <div style={{ marginTop: 10, display: "flex", justifyContent: "flex-end" }}>
               <button className="btn" onClick={()=>setVaultModal(false)}>Close</button>
             </div>
