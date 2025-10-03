@@ -859,11 +859,18 @@ export default function Tamagotchi({
       }
 
       // Banners
-      const cat = catastropheRef.current;
-      if (cat && nowAbs < cat.until) drawBanner(ctx, LOGICAL_W, `⚠ ${cat.cause}! stats draining fast`);
-      if (!deadRef.current && sleepingNow) drawBanner(ctx, LOGICAL_W, "😴 Sleeping");
+      // --- завершили рендер «мира» ---
+ctx.restore();
 
-      ctx.restore();
+// --- баннеры поверх всего (без Y_SHIFT) ---
+const cat = catastropheRef.current;
+if (cat && nowAbs < cat.until) {
+  drawBanner(ctx, LOGICAL_W, `⚠ ${cat.cause}! stats draining fast`);
+}
+if (!deadRef.current && sleepingNow) {
+  drawBanner(ctx, LOGICAL_W, "😴 Sleeping");
+}
+
     };
 
     if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
@@ -951,7 +958,6 @@ export default function Tamagotchi({
         <button className="btn" onClick={act.play}>🎮 Play</button>
         <button className="btn" onClick={act.heal} disabled={healLeft>0}>💊 Heal{healLeft>0?` (${Math.ceil(healLeft/1000)}s)`:``}</button>
         <button className="btn" onClick={act.clean}>🧻 Clean</button>
-        <button className="btn" onClick={() => setAnim((a) => (a === "walk" ? "idle" : "walk"))}>Toggle Walk/Idle</button>
         <button className="btn btn-primary" onClick={() => setForm(forceEvolve(form))}>⭐ Evolve (debug)</button>
         <span className="muted" style={{ alignSelf: "center" }}>
           Poop: {poops.length} | Form: {prettyName(form)} {isSick ? " | 🤒 Sick" : ""} {catastrophe && Date.now() < catastrophe.until ? " | ⚠ Event" : ""} | Age: {(ageMs/1000|0)}s
