@@ -268,16 +268,22 @@ function AppInner() {
 
   // Keep game mounted after death even if lives = 0 (so DeathOverlay is visible)
   const [forceGame, setForceGame] = useState(false);
-  useEffect(() => {
-    const onDead = () => setForceGame(true);
-    const onNew = () => setForceGame(false);
-    window.addEventListener("wg:pet-dead", onDead as any);
-    window.addEventListener("wg:new-game", onNew as any);
-    return () => {
-      window.removeEventListener("wg:pet-dead", onDead as any);
-      window.removeEventListener("wg:new-game", onNew as any);
-    };
-  }, []);
+ // Держим игру смонтированной и на новый старт фиксируем форму = "egg"
+useEffect(() => {
+  const onDead = () => setForceGame(true);
+  const onNew = () => {
+    setForceGame(false);
+    setForm("egg");
+    saveForm("egg"); // <- чтобы локалсторедж тоже обновился
+  };
+  window.addEventListener("wg:pet-dead", onDead as any);
+  window.addEventListener("wg:new-game", onNew as any);
+  return () => {
+    window.removeEventListener("wg:pet-dead", onDead as any);
+    window.removeEventListener("wg:new-game", onNew as any);
+  };
+}, []);
+
 
  // After on-chain confirmation of NFT transfer — grant exactly 1 life
 useEffect(() => {
