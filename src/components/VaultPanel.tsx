@@ -7,28 +7,24 @@ import { useAccount, useConfig, useSwitchChain } from "wagmi";
 import { writeContract, getPublicClient } from "@wagmi/core";
 
 /**
- * VaultPanel (ONE-LINE, ERC-721 only)
+ * VaultPanel (ONE-LINE, ERC-721 only, optimistic confirm)
  * - Single input for tokenId + Send button in one row.
  * - Sends ERC-721 via safeTransferFrom(owner -> VAULT).
- * - On success dispatches "wg:nft-confirmed" (game listens to it).
+ * - Dispatches "wg:nft-confirmed" immediately after tx hash (optimistic),
+ *   and repeats the event again when the receipt confirms.
  * - Comments in English only.
  *
  * ENV required:
  *  - VITE_CHAIN_ID
  *  - VITE_VAULT_ADDRESS
  *
- * NOTE: Collection address kept hardcoded to avoid breaking current logic.
- *       Change ALLOWED_CONTRACT if your 721 address moves.
+ * NOTE: Collection address is kept hardcoded for compatibility.
  */
 
-/* ===== ENV / CONSTS ===== */
 const MONAD_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 const VAULT: Address = (import.meta.env.VITE_VAULT_ADDRESS as Address) ?? zeroAddress;
-
-// Keep current collection hardcoded for compatibility
 const ALLOWED_CONTRACT: Address = "0x88c78d5852f45935324c6d100052958f694e8446";
 
-// Minimal 721 ABI (transfer only)
 const ERC721_WRITE_ABI = [
   {
     type: "function",
@@ -52,11 +48,15 @@ export default function VaultPanel() {
   const [idStr, setIdStr] = useState("");
   const [busy, setBusy] = useState(false);
 
-  // Send 721 by tokenId
+  // Fire the in-game event
+  function fireConfirmed(addr: Address | undefined) {
+    window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address: addr } }));
+  }
+
   async function send() {
     if (!isConnected || !address || VAULT === zeroAddress) return;
     const idNum = Number(idStr);
-    if (!Number.isFinite(idNum) || idNum < 0 || idNum > 10000) return; // guard per your range
+    if (!Number.isFinite(idNum) || idNum < 0 || idNum > 10000) return;
 
     try {
       // Ensure correct chain
@@ -65,6 +65,7 @@ export default function VaultPanel() {
       }
 
       setBusy(true);
+
       const { hash } = await writeContract(cfg, {
         abi: ERC721_WRITE_ABI,
         address: ALLOWED_CONTRACT,
@@ -74,17 +75,17 @@ export default function VaultPanel() {
         chainId: MONAD_CHAIN_ID,
       });
 
-      // Non-blocking confirm; fire event on success when mined
+      // Optimistic: start game immediately
+      fireConfirmed(address as Address);
+
+      // Confirm later (repeat the event on success — harmless)
       pc.waitForTransactionReceipt({ hash, confirmations: 0, timeout: 45_000 })
         .then((rcpt) => {
-          if (rcpt && rcpt.status === "success") {
-            window.dispatchEvent(new CustomEvent("wg:nft-confirmed"));
-          }
+          if (rcpt && rcpt.status === "success") fireConfirmed(address as Address);
         })
-        .catch(() => { /* optional: swallow */ })
+        .catch(() => { /* ignore */ })
         .finally(() => setBusy(false));
 
-      // Optional UX: clear input immediately
       setIdStr("");
     } catch {
       setBusy(false);
@@ -93,7 +94,6 @@ export default function VaultPanel() {
 
   const disabled = !isConnected || VAULT === zeroAddress || busy;
 
-  // One line: [input][button]
   return (
     <div className="w-full flex items-center gap-2">
       <input
