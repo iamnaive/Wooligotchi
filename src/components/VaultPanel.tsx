@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { zeroAddress } from "viem";
 import { useAccount, useConfig, useSwitchChain } from "wagmi";
 import { readContract, writeContract, getPublicClient } from "@wagmi/core";
@@ -62,34 +62,16 @@ const ERC1155_ABI = [
     outputs: [] },
 ] as const;
 
-/* ===== Local persistence (lives & cache) ===== */
+/* ===== Small local helpers (for showing lives in this panel) ===== */
 const LIVES_KEY = "wg_lives_v1";
-const LASTID_KEY = "wg_last_token_v1";
-
 const livesKey = (cid:number, addr:string)=>`${cid}:${addr.toLowerCase()}`;
-const lastIdKey = (cid:number, addr:string, contract:string, std:"ERC721"|"ERC1155") =>
-  `${cid}:${addr.toLowerCase()}:${contract.toLowerCase()}:${std}`;
-
 const getLives = (cid:number, addr?:string|null) => {
   if (!addr) return 0;
   const raw = localStorage.getItem(LIVES_KEY);
   const map = raw ? (JSON.parse(raw) as Record<string, number>) : {};
   return map[livesKey(cid, addr)] ?? 0;
 };
-const getCachedId = (cid:number, addr:string, contract:string, std:"ERC721"|"ERC1155") => {
-  const raw = localStorage.getItem(LASTID_KEY);
-  const map = raw ? (JSON.parse(raw) as Record<string, string>) : {};
-  const v = map[lastIdKey(cid, addr, contract, std)];
-  return v ? BigInt(v) : null;
-};
-const setCachedId = (cid:number, addr:string, contract:string, std:"ERC721"|"ERC1155", id:bigint) => {
-  const raw = localStorage.getItem(LASTID_KEY);
-  const map = raw ? (JSON.parse(raw) as Record<string, string>) : {};
-  map[lastIdKey(cid, addr, contract, std)] = id.toString();
-  localStorage.setItem(LASTID_KEY, JSON.stringify(map));
-};
 
-/* ===== Inner component (logic) ===== */
 type Std = "ERC721" | "ERC1155" | "UNKNOWN";
 
 function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
@@ -101,23 +83,18 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
   const [log, setLog] = useState("");
   const [busy, setBusy] = useState(false);
   const [lives, setLives] = useState(() => getLives(MONAD_CHAIN_ID, address));
-  const [manualId, setManualId] = useState("");
   const [modeScan, setModeScan] = useState<"balanced"|"fast">("balanced");
 
   function append(s: string) { setLog((p) => (p ? p + "\n" : "") + s); }
   const canSend = isConnected && VAULT !== zeroAddress;
 
-  // первичная подгрузка жизней для адреса
   useEffect(() => { if (address) setLives(getLives(MONAD_CHAIN_ID, address)); }, [address]);
-
-  // подписка на внешнее обновление жизней (когда App.tsx начисляет их по wg:nft-confirmed)
   useEffect(() => {
     const onLives = () => setLives(getLives(MONAD_CHAIN_ID, address));
     window.addEventListener("wg:lives-changed", onLives as any);
     return () => window.removeEventListener("wg:lives-changed", onLives as any);
   }, [address]);
 
-  // определение стандарта
   useEffect(() => {
     (async () => {
       try {
@@ -141,9 +118,6 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function ensureMonad() { try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {} }
-
-  /* ---------- Utils ---------- */
   const sleep = (ms:number)=>new Promise(r=>setTimeout(r,ms));
   function chunkify(start: number, end: number, step = 1): number[][] {
     const out: number[][] = []; let buf: number[] = [];
@@ -189,8 +163,8 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     } catch { return null; }
   }
 
-  async function probe721Batch(user: `0x${string}`, ids: number[]): Promise<bigint | null> {
-    const res = await Promise.allSettled(ids.map(ownerOfSafe));
+  async function probe721Batch(user: `0x${string}`, ids: number[]) {
+    const res = await Promise.allSettled(ids.map((id)=>ownerOfSafe(id)));
     for (let i = 0; i < res.length; i++) {
       const v = res[i];
       if (v.status === "fulfilled" && v.value && v.value.toLowerCase() === user.toLowerCase()) {
@@ -199,8 +173,8 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     }
     return null;
   }
-  async function probe1155Batch(user: `0x${string}`, ids: number[]): Promise<bigint | null> {
-    const res = await Promise.allSettled(ids.map((id) => balance1155Safe(user, id)));
+  async function probe1155Batch(user: `0x${string}`, ids: number[]) {
+    const res = await Promise.allSettled(ids.map((id)=>balance1155Safe(user, id)));
     for (let i = 0; i < res.length; i++) {
       const v = res[i];
       if (v.status === "fulfilled" && v.value && v.value > 0n) {
@@ -210,7 +184,7 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     return null;
   }
 
-  async function tryEnumerableFirst(user: `0x${string}`): Promise<bigint | null> {
+  async function tryEnumerableFirst(user: `0x${string}`) {
     try {
       const enumerable = await readContract(cfg, {
         abi: ERC165_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
@@ -228,20 +202,13 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     } catch { return null; }
   }
 
-  async function pickAnyErc721(user: `0x${string}`): Promise<bigint | null> {
-    const cached = getCachedId(MONAD_CHAIN_ID, user, ALLOWED_CONTRACT, "ERC721");
-    if (cached !== null) {
-      const owner = await ownerOfSafe(Number(cached));
-      if (owner && owner.toLowerCase() === user.toLowerCase()) return cached;
-    }
-
+  async function pickAnyErc721(user: `0x${string}`) {
     if ((await balance721Of(user)) === 0n) return null;
 
     const idEnum = await tryEnumerableFirst(user);
     if (idEnum !== null) return idEnum;
 
     let probes = 0;
-
     {
       const batches = chunkify(0, SMALL_FIRST_RANGE);
       for (let b = 0; b < batches.length; b++) {
@@ -252,7 +219,6 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
         if (probes >= MAX_ERC721_PROBES || modeScan === "fast") break;
       }
     }
-
     const topGuess = (await readTotalSupplyGuess()) ?? DEFAULT_TOP_GUESS;
     {
       const batches = chunkify(topGuess - 1, Math.max(0, topGuess - MAX_ERC721_PROBES), -1);
@@ -264,19 +230,11 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
         if (probes >= MAX_ERC721_PROBES) break;
       }
     }
-
     return null;
   }
 
-  async function pickAnyErc1155(user: `0x${string}`): Promise<bigint | null> {
-    const cached = getCachedId(MONAD_CHAIN_ID, user, ALLOWED_CONTRACT, "ERC1155");
-    if (cached !== null) {
-      const bal = await balance1155Safe(user, Number(cached));
-      if (bal > 0n) return cached;
-    }
-
+  async function pickAnyErc1155(user: `0x${string}`) {
     let probes = 0;
-
     {
       const batches = chunkify(0, SMALL_FIRST_RANGE);
       for (let b = 0; b < batches.length; b++) {
@@ -287,13 +245,10 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
         if (probes >= MAX_ERC1155_PROBES || modeScan === "fast") break;
       }
     }
-
     const hints: number[] = []; for (let v = 128; v <= 65536; v *= 2) hints.push(v);
     {
       const batches: number[][] = [];
-      for (let i = 0; i < hints.length; i += BATCH_SIZE) {
-        batches.push(hints.slice(i, i + BATCH_SIZE));
-      }
+      for (let i = 0; i < hints.length; i += BATCH_SIZE) batches.push(hints.slice(i, i + BATCH_SIZE));
       for (let b = 0; b < batches.length; b++) {
         const hit = await probe1155Batch(user, batches[b]);
         probes += batches[b].length;
@@ -302,11 +257,10 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
         if (probes >= MAX_ERC1155_PROBES) break;
       }
     }
-
     return null;
   }
 
-  /* ---------- Send & request life grant via event ---------- */
+  /* ---------- Send & notify app ---------- */
   async function sendOne() {
     if (!isConnected || VAULT === zeroAddress || !address) return;
     setBusy(true); setLog("");
@@ -327,8 +281,7 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
           const pc = getPublicClient(cfg, { chainId: MONAD_CHAIN_ID });
           const receipt = await pc.waitForTransactionReceipt({ hash: txHash });
           if (receipt.status === "success") {
-            setCachedId(MONAD_CHAIN_ID, address, ALLOWED_CONTRACT, "ERC721", id);
-            // 👉 сообщаем приложению: транзакция подтверждена — начисляйте жизнь
+            // сообщаем приложению — начисляйте жизнь
             window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address } }));
           }
           setBusy(false);
@@ -348,8 +301,6 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
         const pc = getPublicClient(cfg, { chainId: MONAD_CHAIN_ID });
         const receipt = await pc.waitForTransactionReceipt({ hash: txHash });
         if (receipt.status === "success") {
-          setCachedId(MONAD_CHAIN_ID, address, ALLOWED_CONTRACT, "ERC1155", id1155);
-          // 👉 сообщаем приложению: транзакция подтверждена — начисляйте жизнь
           window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address } }));
         }
         setBusy(false);
@@ -365,9 +316,7 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
   }
 
   /* ---------- UI ---------- */
-
   if (mode === "cta") {
-    // Single centered CTA for the splash gate
     return (
       <div style={{ display:"grid", placeItems:"center", marginTop:8 }}>
         <button className="btn btn-primary btn-lg" onClick={sendOne} disabled={!canSend || busy}>
@@ -381,7 +330,6 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     );
   }
 
-  // Full panel (not used on splash by default, but available)
   return (
     <div className="mx-auto mt-6 max-w-3xl rounded-2xl card">
       <div className="mb-2 text-sm muted">
@@ -390,7 +338,6 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
       <div className="mb-2 text-sm muted">
         Allowed: <span className="font-mono">{ALLOWED_CONTRACT}</span>
       </div>
-
       <div className="mb-2 text-xs muted" style={{display:"flex", gap:8, alignItems:"center"}}>
         <span>Scan mode:</span>
         <button className={`btn ${modeScan==="balanced"?"":"btn-ghost"}`} onClick={()=>setModeScan("balanced")}>Balanced</button>
