@@ -220,7 +220,7 @@ export default function Tamagotchi({
   }, [def, form]);
 
   /** Start timestamp */
-  const [startTs] = useState<number>(() => {
+  const [startTs, setStartTs] = useState<number>(() => {
     try {
       const raw = localStorage.getItem(sk(START_TS_KEY));
       if (raw) return Number(raw);
@@ -504,6 +504,7 @@ export default function Tamagotchi({
       localStorage.setItem(sk(LAST_SEEN_KEY), String(now));
       localStorage.setItem(sk(AGE_MAX_WALL_KEY), String(now));
     } catch {}
+    setStartTs(now);
     window.dispatchEvent(new CustomEvent("wg:new-game"));
   };
 
