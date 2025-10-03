@@ -282,7 +282,8 @@ function AppInner() {
               currentForm={form}
               onEvolve={evolve}
               lives={lives}
-              onLoseLife={() = renderGame={() => ((window as any).__wgRenderGame?.() ?? null)}> spendOneLife(chainId, address)}
+              onLoseLife={() => spendOneLife(chainId, address)}
+              renderGame={() => ((window as any).__wgRenderGame?.() ?? null)}
               walletAddress={address || undefined}
             />
           </GameProvider>
