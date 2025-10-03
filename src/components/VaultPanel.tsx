@@ -76,17 +76,6 @@ const getLives = (cid:number, addr?:string|null) => {
   const map = raw ? (JSON.parse(raw) as Record<string, number>) : {};
   return map[livesKey(cid, addr)] ?? 0;
 };
-const setLivesPersist = (cid:number, addr:string, val:number) => {
-  const raw = localStorage.getItem(LIVES_KEY);
-  const map = raw ? (JSON.parse(raw) as Record<string, number>) : {};
-  map[livesKey(cid, addr)] = val;
-  localStorage.setItem(LIVES_KEY, JSON.stringify(map));
-  return val;
-};
-const addLives = (cid:number, addr:string, d=1) => {
-  const cur = getLives(cid, addr);
-  return setLivesPersist(cid, addr, cur + d);
-};
 const getCachedId = (cid:number, addr:string, contract:string, std:"ERC721"|"ERC1155") => {
   const raw = localStorage.getItem(LASTID_KEY);
   const map = raw ? (JSON.parse(raw) as Record<string, string>) : {};
@@ -118,8 +107,17 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
   function append(s: string) { setLog((p) => (p ? p + "\n" : "") + s); }
   const canSend = isConnected && VAULT !== zeroAddress;
 
+  // первичная подгрузка жизней для адреса
   useEffect(() => { if (address) setLives(getLives(MONAD_CHAIN_ID, address)); }, [address]);
 
+  // подписка на внешнее обновление жизней (когда App.tsx начисляет их по wg:nft-confirmed)
+  useEffect(() => {
+    const onLives = () => setLives(getLives(MONAD_CHAIN_ID, address));
+    window.addEventListener("wg:lives-changed", onLives as any);
+    return () => window.removeEventListener("wg:lives-changed", onLives as any);
+  }, [address]);
+
+  // определение стандарта
   useEffect(() => {
     (async () => {
       try {
@@ -308,7 +306,7 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     return null;
   }
 
-  /* ---------- Send & grant life ---------- */
+  /* ---------- Send & request life grant via event ---------- */
   async function sendOne() {
     if (!isConnected || VAULT === zeroAddress || !address) return;
     setBusy(true); setLog("");
@@ -330,9 +328,8 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
           const receipt = await pc.waitForTransactionReceipt({ hash: txHash });
           if (receipt.status === "success") {
             setCachedId(MONAD_CHAIN_ID, address, ALLOWED_CONTRACT, "ERC721", id);
-            const total = addLives(MONAD_CHAIN_ID, address, 1);
-            setLives(total);
-            window.dispatchEvent(new Event('wg:lives-changed'));
+            // 👉 сообщаем приложению: транзакция подтверждена — начисляйте жизнь
+            window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address } }));
           }
           setBusy(false);
           return;
@@ -352,9 +349,8 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
         const receipt = await pc.waitForTransactionReceipt({ hash: txHash });
         if (receipt.status === "success") {
           setCachedId(MONAD_CHAIN_ID, address, ALLOWED_CONTRACT, "ERC1155", id1155);
-          const total = addLives(MONAD_CHAIN_ID, address, 1);
-          setLives(total);
-          window.dispatchEvent(new Event('wg:lives-changed'));
+          // 👉 сообщаем приложению: транзакция подтверждена — начисляйте жизнь
+          window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address } }));
         }
         setBusy(false);
         return;
@@ -414,4 +410,4 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
       <div className="mt-1 text-sm">Lives: <span className="font-semibold">{lives}</span></div>
     </div>
   );
-} 
+}
