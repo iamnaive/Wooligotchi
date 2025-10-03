@@ -1,53 +1,72 @@
 'use client';
 
-import { createConfig, http } from 'wagmi';
+import { createConfig, http, webSocket } from 'wagmi';
 import { createPublicClient, fallback } from 'viem';
-import { mainnet } from 'viem/chains'; // not used, but keeps types happy
 
-// Minimal custom Monad Testnet chain
+/**
+ * We switch to WS-first transport to avoid HTTP polling storms.
+ * HTTP remains as a gentle fallback (no batching, minimal retries).
+ *
+ * Required env:
+ *  - VITE_CHAIN_ID=10143
+ *  - VITE_RPC_URL=https://monad-testnet.blockvision.org/v1/<YOUR_KEY>
+ *  - VITE_RPC_WSS=wss://monad-testnet.blockvision.org/v1/<YOUR_KEY>
+ */
+
+const CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
+const RPC_HTTP = String(import.meta.env.VITE_RPC_URL || '');
+const RPC_WSS  = String(import.meta.env.VITE_RPC_WSS || ''); // <-- add this on Vercel!
+
+// Minimal Monad Testnet chain object
 const MONAD_TESTNET = {
-  id: Number(import.meta.env.VITE_CHAIN_ID ?? 10143),
+  id: CHAIN_ID,
   name: 'Monad Testnet',
   network: 'monad-testnet',
   nativeCurrency: { name: 'MON', symbol: 'MON', decimals: 18 },
   rpcUrls: {
-    default: { http: [String(import.meta.env.VITE_RPC_URL || '')] },
-    public:  { http: [String(import.meta.env.VITE_RPC_URL || '')] },
+    default: { http: [RPC_HTTP], webSocket: [RPC_WSS] as any },
+    public:  { http: [RPC_HTTP], webSocket: [RPC_WSS] as any },
   },
-  // No multicall on this chain (avoid viem multicall attempts)
-  contracts: {},
+  contracts: {}, // no multicall here
 } as const;
 
-// Use BlockVision RPC (key-in-URL) with gentle settings
-const RPC_URL = String(import.meta.env.VITE_RPC_URL || '');
-const transport = fallback([
-  http(RPC_URL, {
-    batch: false,            // do not batch -> some testnets throttle batched calls
-    retryCount: 1,           // fewer automatic retries
-    timeout: 20_000,         // shorter timeouts
-    // headers: {}            // not needed for key-in-URL
-  }),
-]);
+// WS first, HTTP fallback — both without batching & with gentle retrying
+const wsTransport  = RPC_WSS
+  ? webSocket(RPC_WSS, { retryCount: 1, timeout: 20_000 })
+  : null;
+
+const httpTransport = http(RPC_HTTP, {
+  batch: false,
+  retryCount: 1,
+  timeout: 20_000,
+});
+
+// If WS exists, prefer it; otherwise just HTTP
+const transport = wsTransport
+  ? fallback([wsTransport, httpTransport])
+  : httpTransport;
 
 /**
- * Lower polling + small caches help avoid 429s on limited RPCs.
- * - pollingInterval: how often viem polls block/tx receipt (ms)
- * - gcTime: cache lifetime (ms)
+ * Notes:
+ * - pollingInterval kept high (or effectively unused with WS).
+ * - batch.multicall disabled.
+ * - cacheTime / gcTime a bit longer, reducing re-reads.
+ * - multiInjectedProviderDiscovery off to avoid extra noise from other wallets.
  */
 export const wagmiConfig = createConfig({
   chains: [MONAD_TESTNET as any],
   transports: { [MONAD_TESTNET.id]: transport },
   ssr: false,
   multiInjectedProviderDiscovery: false,
-  pollingInterval: 12_000, // 12s (default ~4s) — сильно меньше нагрузки
-  // @ts-expect-error viem publicClient options exist at runtime
+  pollingInterval: 20_000, // ws will handle updates; http fallback polls rarely
+  // @ts-expect-error viem accepts these at runtime
   client: ({ chain }) =>
     createPublicClient({
       chain: chain as any,
       transport,
-      cacheTime: 30_000,     // cache results for 30s
-      batch: { multicall: false }, // never try multicall on this chain
-      pollingInterval: 12_000,
+      cacheTime: 60_000,
+      batch: { multicall: false },
+      pollingInterval: 20_000,
     }),
 });
 
