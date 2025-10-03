@@ -333,11 +333,13 @@ useEffect(() => {
     }
   };
 
-  const evolve = React.useCallback(() => {
-    const next = nextFormRandom(form);
-    setForm(next);
+  const evolve = React.useCallback((next?: FormKey) => {
+  if (next && catalog[next]) {
+    setForm(next);   // сохраняем форму, пришедшую из Tamagotchi
     return next;
-  }, [form]);
+  }
+  return next as any;
+}, []);
 
   // Gate:
   // - splash: not connected
