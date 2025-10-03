@@ -1,18 +1,16 @@
 'use client';
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { zeroAddress } from "viem";
 import { useAccount, useConfig, useSwitchChain } from "wagmi";
 import { readContract, writeContract, getPublicClient } from "@wagmi/core";
 
-/** VaultPanel
- *  - Finds an owned NFT on the connected address (NOT on the vault).
- *  - Supports ERC-721 (incl. non-enumerable) and ERC-1155.
- *  - Auto-pick flow (Send automatically) + manual ID inputs (safe fallback).
- *  - Emits "wg:nft-confirmed" on successful receipt, which your Tamagotchi listens to.
- *
- *  Public API is unchanged:
- *  export default function VaultPanel({ mode = "full" | "cta" })
+/** VaultPanel (speed-optimized)
+ *  - Uses multicall for batch owner/balance checks (much faster).
+ *  - Has "fast" mode by default, and "balanced" if you want deeper scan.
+ *  - Supports manual send by ID for both ERC-721 and ERC-1155 (instant, no scan).
+ *  - Surfaces tx hash + explorer link; robust receipt waiting with timeout.
+ *  - Emits "wg:nft-confirmed" on success, preserving your existing flow.
  */
 
 export default function VaultPanel({ mode = "full" }: { mode?: "full" | "cta" }) {
@@ -23,19 +21,20 @@ export default function VaultPanel({ mode = "full" }: { mode?: "full" | "cta" })
 const MONAD_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 const ALLOWED_CONTRACT = "0x88c78d5852f45935324c6d100052958f694e8446";
 const VAULT = (import.meta.env.VITE_VAULT_ADDRESS as string) || zeroAddress;
+const EXPLORER = (import.meta.env.VITE_EXPLORER_URL as string) || "";
 
-/* ---- Probe tuning (kept names; robust for 10k ids) ----
- * Balanced: better chance to find across sparse/gapped ID spaces.
- * Fast: quicker, fewer probes.
+/* ---- Probe tuning ----
+ * Fast mode: quickest, fewer probes.
+ * Balanced mode: deeper, still capped to avoid long scans.
  */
-const SMALL_FIRST_RANGE = 64;            // quick check near 0
-const MAX_ERC721_PROBES_BAL = 2000;      // cap for 721 in balanced mode
-const MAX_ERC721_PROBES_FAST = 600;      // cap for 721 in fast mode
-const MAX_ERC1155_PROBES_BAL = 800;      // cap for 1155 in balanced mode
-const MAX_ERC1155_PROBES_FAST = 400;     // cap for 1155 in fast mode
-const DEFAULT_TOP_GUESS  = 10_000;       // you said 10k ids on this contract
-const BATCH_SIZE         = 24;           // parallel requests per batch
-const YIELD_EVERY        = 6;            // cooperative yielding cadence
+const SMALL_FIRST_RANGE = 64;
+const MAX_ERC721_PROBES_FAST = 500;     // ~1–2 multicalls
+const MAX_ERC721_PROBES_BAL = 1800;     // deeper search
+const MAX_ERC1155_PROBES_FAST = 256;
+const MAX_ERC1155_PROBES_BAL = 800;
+const DEFAULT_TOP_GUESS  = 10_000;      // you have 10k ids
+const BATCH_SIZE         = 32;          // multicall batch size
+const YIELD_EVERY        = 6;
 
 /* ===== ABIs ===== */
 const ERC165_ABI = [
@@ -60,11 +59,7 @@ const ERC721_READ_ABI = [
 
 const ERC721_WRITE_ABI = [
   { type: "function", name: "safeTransferFrom", stateMutability: "nonpayable",
-    inputs: [
-      { name: "from", type: "address" },
-      { name: "to", type: "address" },
-      { name: "tokenId", type: "uint256" }
-    ],
+    inputs: [{ name: "from", type: "address" }, { name: "to", type: "address" }, { name: "tokenId", type: "uint256" }],
     outputs: [] },
 ] as const;
 
@@ -80,7 +75,7 @@ const ERC1155_ABI = [
     outputs: [] },
 ] as const;
 
-/* ===== Lives storage (unchanged) ===== */
+/* ===== Lives (unchanged) ===== */
 const LIVES_KEY = "wg_lives_v1";
 const livesKey = (cid:number, addr:string)=>`${cid}:${addr.toLowerCase()}`;
 const getLives = (cid:number, addr?:string|null) => {
@@ -94,16 +89,18 @@ type Std = "ERC721" | "ERC1155" | "UNKNOWN";
 
 function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
   const cfg = useConfig();
+  const pc = useMemo(() => getPublicClient(cfg, { chainId: MONAD_CHAIN_ID }), [cfg]);
   const { address, isConnected } = useAccount();
   const { switchChain } = useSwitchChain();
 
   const [std, setStd] = useState<Std>("UNKNOWN");
   const [log, setLog] = useState("");
   const [busy, setBusy] = useState(false);
+  const [tx, setTx] = useState<`0x${string}` | null>(null);
   const [lives, setLives] = useState(() => getLives(MONAD_CHAIN_ID, address));
-  const [modeScan, setModeScan] = useState<"balanced"|"fast">("balanced");
+  const [modeScan, setModeScan] = useState<"fast"|"balanced">("fast"); // default to fast
 
-  // Manual ID inputs (safe fallback when auto-scan misses)
+  // Manual send inputs
   const [manualId721, setManualId721] = useState<string>("");
   const [manualId1155, setManualId1155] = useState<string>("");
 
@@ -117,29 +114,25 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     return () => window.removeEventListener("wg:lives-changed", onLives as any);
   }, [address]);
 
-  // Detect token standard
+  // Detect token standard (in parallel)
   useEffect(() => {
     (async () => {
       try {
         setStd("UNKNOWN");
-        append("Detecting token standard on Monad…");
-        const is721 = await readContract(cfg, {
-          abi: ERC165_ABI,
-          address: ALLOWED_CONTRACT as `0x${string}`,
-          functionName: "supportsInterface",
-          args: [IFACE_ERC721 as `0x${string}`],
-          chainId: MONAD_CHAIN_ID,
-        });
-        if (is721) { setStd("ERC721"); append("✓ ERC-721"); return; }
-        const is1155 = await readContract(cfg, {
-          abi: ERC165_ABI,
-          address: ALLOWED_CONTRACT as `0x${string}`,
-          functionName: "supportsInterface",
-          args: [IFACE_ERC1155 as `0x${string}`],
-          chainId: MONAD_CHAIN_ID,
-        });
-        if (is1155) { setStd("ERC1155"); append("✓ ERC-1155"); return; }
-        append("⚠️ Unknown; will try both.");
+        append("Detecting token standard…");
+        const [is721, is1155] = await Promise.all([
+          readContract(cfg, {
+            abi: ERC165_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
+            functionName: "supportsInterface", args: [IFACE_ERC721 as `0x${string}`], chainId: MONAD_CHAIN_ID,
+          }).catch(()=>false),
+          readContract(cfg, {
+            abi: ERC165_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
+            functionName: "supportsInterface", args: [IFACE_ERC1155 as `0x${string}`], chainId: MONAD_CHAIN_ID,
+          }).catch(()=>false),
+        ]);
+        if (is721) { setStd("ERC721"); append("✓ ERC-721"); }
+        else if (is1155) { setStd("ERC1155"); append("✓ ERC-1155"); }
+        else append("⚠️ Unknown; will try both.");
       } catch {
         append("ℹ️ Standard detection failed; fallback enabled.");
       }
@@ -147,108 +140,74 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* ===== small utils ===== */
+  /* ===== utils ===== */
   const sleep = (ms:number)=>new Promise(r=>setTimeout(r,ms));
 
-  function chunkify(start: number, end: number, step = 1): number[][] {
-    const out: number[][] = []; let buf: number[] = [];
-    for (let i = start; step > 0 ? i <= end : i >= end; i += step) {
-      buf.push(i); if (buf.length === BATCH_SIZE) { out.push(buf); buf = []; }
-    }
-    if (buf.length) out.push(buf);
+  function range(start: number, end: number, step = 1): number[] {
+    const out: number[] = [];
+    if (step > 0) for (let i = start; i <= end; i += step) out.push(i);
+    else for (let i = start; i >= end; i += step) out.push(i);
     return out;
   }
 
-  async function ownerOfSafe(id: number): Promise<`0x${string}` | null> {
+  function chunk<T>(arr: T[], sz: number): T[][] {
+    const res: T[][] = [];
+    for (let i = 0; i < arr.length; i += sz) res.push(arr.slice(i, i + sz));
+    return res;
+  }
+
+  async function supportsEnumerable(): Promise<boolean> {
     try {
-      return (await readContract(cfg, {
-        abi: ERC721_READ_ABI,
-        address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "ownerOf",
-        args: [BigInt(id)],
+      return await readContract(cfg, {
+        abi: ERC165_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
+        functionName: "supportsInterface", args: [IFACE_ERC721_ENUM as `0x${string}`],
         chainId: MONAD_CHAIN_ID,
-      })) as `0x${string}`;
-    } catch { return null; }
+      }) as boolean;
+    } catch { return false; }
   }
 
   async function balance721Of(user:`0x${string}`): Promise<bigint> {
     try {
-      return (await readContract(cfg, {
-        abi: ERC721_READ_ABI,
-        address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "balanceOf",
-        args: [user],
-        chainId: MONAD_CHAIN_ID,
-      })) as bigint;
+      return await readContract(cfg, {
+        abi: ERC721_READ_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
+        functionName: "balanceOf", args: [user], chainId: MONAD_CHAIN_ID,
+      }) as bigint;
     } catch { return 0n; }
   }
 
-  async function balance1155Safe(user: `0x${string}`, id: number): Promise<bigint> {
-    try {
-      return (await readContract(cfg, {
-        abi: ERC1155_ABI,
-        address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "balanceOf",
-        args: [user, BigInt(id)],
-        chainId: MONAD_CHAIN_ID,
-      })) as bigint;
-    } catch { return 0n; }
-  }
+  /* ===== multicall probes ===== */
 
-  async function readTotalSupplyGuess(): Promise<number | null> {
-    try {
-      const ts = await readContract(cfg, {
-        abi: ERC721_READ_ABI,
-        address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "totalSupply",
-        args: [],
-        chainId: MONAD_CHAIN_ID,
-      }) as bigint;
-      const n = Number(ts);
-      return Number.isFinite(n) && n > 0 ? n : null;
-    } catch { return null; }
-  }
-
-  async function tryEnumerableFirst(user: `0x${string}`) {
-    try {
-      const enumerable = await readContract(cfg, {
-        abi: ERC165_ABI,
-        address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "supportsInterface",
-        args: [IFACE_ERC721_ENUM as `0x${string}`],
-        chainId: MONAD_CHAIN_ID,
-      });
-      if (!enumerable) return null;
-      const bal = await balance721Of(user);
-      if (bal === 0n) return null;
-      const id0 = await readContract(cfg, {
-        abi: ERC721_READ_ABI,
-        address: ALLOWED_CONTRACT as `0x${string}`,
-        functionName: "tokenOfOwnerByIndex",
-        args: [user, 0n],
-        chainId: MONAD_CHAIN_ID,
-      }) as bigint;
-      return id0;
-    } catch { return null; }
-  }
-
-  async function probe721Batch(user: `0x${string}`, ids: number[]) {
-    const res = await Promise.allSettled(ids.map((id)=>ownerOfSafe(id)));
+  async function probe721Multicall(user: `0x${string}`, ids: number[]): Promise<bigint | null> {
+    const contracts = ids.map((id) => ({
+      address: ALLOWED_CONTRACT as `0x${string}`,
+      abi: ERC721_READ_ABI,
+      functionName: "ownerOf" as const,
+      args: [BigInt(id)],
+    }));
+    const res = await pc.multicall({ contracts, allowFailure: true });
     for (let i = 0; i < res.length; i++) {
-      const v = res[i];
-      if (v.status === "fulfilled" && v.value && v.value.toLowerCase() === user.toLowerCase()) {
-        return BigInt(ids[i]);
+      const r = res[i];
+      if (r.status === "success") {
+        const owner = (r.result as `0x${string}`).toLowerCase();
+        if (owner === user.toLowerCase()) return BigInt(ids[i]);
       }
     }
     return null;
   }
 
-  async function probe1155Batch(user: `0x${string}`, ids: number[]) {
-    const res = await Promise.allSettled(ids.map((id)=>balance1155Safe(user, id)));
+  async function probe1155Multicall(user: `0x${string}`, ids: number[]): Promise<bigint | null> {
+    const contracts = ids.map((id) => ({
+      address: ALLOWED_CONTRACT as `0x${string}`,
+      abi: ERC1155_ABI,
+      functionName: "balanceOf" as const,
+      args: [user, BigInt(id)],
+    }));
+    const res = await pc.multicall({ contracts, allowFailure: true });
     for (let i = 0; i < res.length; i++) {
-      const v = res[i];
-      if (v.status === "fulfilled" && v.value && v.value > 0n) {
-        return BigInt(ids[i]);
+      const r = res[i];
+      if (r.status === "success") {
+        const bal = r.result as bigint;
+        if (bal > 0n) return BigInt(ids[i]);
       }
     }
     return null;
@@ -259,57 +218,66 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
   async function pickAnyErc721(user: `0x${string}`) {
     if ((await balance721Of(user)) === 0n) return null;
 
-    // 1) Enumerable shortcut (cheapest if available)
-    const idEnum = await tryEnumerableFirst(user);
-    if (idEnum !== null) return idEnum;
+    // 1) Enumerable shortcut (tokenOfOwnerByIndex)
+    if (await supportsEnumerable()) {
+      try {
+        const id0 = await readContract(cfg, {
+          abi: ERC721_READ_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
+          functionName: "tokenOfOwnerByIndex", args: [user, 0n], chainId: MONAD_CHAIN_ID,
+        }) as bigint;
+        return id0;
+      } catch {}
+    }
 
-    // Probes budget depends on mode
-    const PROBES_CAP = modeScan === "fast" ? MAX_ERC721_PROBES_FAST : MAX_ERC721_PROBES_BAL;
-    let probes = 0;
+    // Budget per mode
+    const cap = modeScan === "fast" ? MAX_ERC721_PROBES_FAST : MAX_ERC721_PROBES_BAL;
+    let spent = 0;
 
-    // 2) Small front window [0..SMALL_FIRST_RANGE]
+    // 2) Front window [0..SMALL_FIRST_RANGE]
     {
-      const batches = chunkify(0, SMALL_FIRST_RANGE);
-      for (let b = 0; b < batches.length; b++) {
-        const hit = await probe721Batch(user, batches[b]);
-        probes += batches[b].length;
+      const ids = range(0, SMALL_FIRST_RANGE);
+      const batches = chunk(ids, BATCH_SIZE);
+      for (const b of batches) {
+        const hit = await probe721Multicall(user, b);
+        spent += b.length;
         if (hit !== null) return hit;
-        if (b % YIELD_EVERY === 0) await sleep(0);
-        if (probes >= PROBES_CAP) return null;
+        if (spent >= cap) return null;
+        await sleep(0);
       }
     }
 
-    // 3) Top-down window near totalSupply or default top (10k)
-    const topGuess = (await readTotalSupplyGuess()) ?? DEFAULT_TOP_GUESS;
+    // 3) Top-down near totalSupply (or default top)
+    const topGuess = DEFAULT_TOP_GUESS; // cheap: no extra read
     {
-      const remainBudget = PROBES_CAP - probes;
-      const maxDown = Math.min(remainBudget, Math.max(0, remainBudget >> 1));
-      const start = topGuess - 1;
-      const end   = Math.max(0, topGuess - maxDown);
-      const batches = chunkify(start, end, -1);
-      for (let b = 0; b < batches.length; b++) {
-        const hit = await probe721Batch(user, batches[b]);
-        probes += batches[b].length;
-        if (hit !== null) return hit;
-        if (b % YIELD_EVERY === 0) await sleep(0);
-        if (probes >= PROBES_CAP) return null;
+      const remain = cap - spent;
+      const down = Math.max(0, Math.floor(remain * 0.6));
+      if (down > 0) {
+        const ids = range(topGuess - 1, Math.max(0, topGuess - down), -1);
+        const batches = chunk(ids, BATCH_SIZE);
+        for (const b of batches) {
+          const hit = await probe721Multicall(user, b);
+          spent += b.length;
+          if (hit !== null) return hit;
+          if (spent >= cap) return null;
+          await sleep(0);
+        }
       }
     }
 
-    // 4) Sparse stride across 0..topGuess to cover gapped ID spaces
+    // 4) Sparse stride across 0..topGuess
     {
-      const remain = PROBES_CAP - probes;
+      const remain = cap - spent;
       if (remain <= 0) return null;
       const stride = Math.max(1, Math.ceil(topGuess / remain));
       const picks: number[] = [];
       for (let i = 0; i <= topGuess && picks.length < remain; i += stride) picks.push(i);
-      const batches = chunkify(0, picks.length - 1).map(idxBatch => idxBatch.map(i => picks[i]));
-      for (let b = 0; b < batches.length; b++) {
-        const hit = await probe721Batch(user, batches[b]);
-        probes += batches[b].length;
+      const batches = chunk(picks, BATCH_SIZE);
+      for (const b of batches) {
+        const hit = await probe721Multicall(user, b);
+        spent += b.length;
         if (hit !== null) return hit;
-        if (b % YIELD_EVERY === 0) await sleep(0);
-        if (probes >= PROBES_CAP) return null;
+        if (spent >= cap) return null;
+        await sleep(0);
       }
     }
 
@@ -317,62 +285,73 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
   }
 
   async function pickAnyErc1155(user: `0x${string}`) {
-    const PROBES_CAP = modeScan === "fast" ? MAX_ERC1155_PROBES_FAST : MAX_ERC1155_PROBES_BAL;
-    let probes = 0;
+    const cap = modeScan === "fast" ? MAX_ERC1155_PROBES_FAST : MAX_ERC1155_PROBES_BAL;
+    let spent = 0;
 
-    // 1) Small front window
+    // 1) Front window
     {
-      const batches = chunkify(0, SMALL_FIRST_RANGE);
-      for (let b = 0; b < batches.length; b++) {
-        const hit = await probe1155Batch(user, batches[b]);
-        probes += batches[b].length;
+      const ids = range(0, SMALL_FIRST_RANGE);
+      const batches = chunk(ids, BATCH_SIZE);
+      for (const b of batches) {
+        const hit = await probe1155Multicall(user, b);
+        spent += b.length;
         if (hit !== null) return hit;
-        if (b % YIELD_EVERY === 0) await sleep(0);
-        if (probes >= PROBES_CAP) return null;
+        if (spent >= cap) return null;
+        await sleep(0);
       }
     }
 
-    // 2) Powers-of-two hints (common practice for 1155 id spaces)
-    const hints: number[] = [];
-    for (let v = 128; v <= 65536 && probes < PROBES_CAP; v *= 2) hints.push(v);
+    // 2) Powers-of-two hints
     {
-      const batches: number[][] = [];
-      for (let i = 0; i < hints.length; i += BATCH_SIZE) batches.push(hints.slice(i, i + BATCH_SIZE));
-      for (let b = 0; b < batches.length; b++) {
-        const hit = await probe1155Batch(user, batches[b]);
-        probes += batches[b].length;
+      const hints: number[] = [];
+      for (let v = 128; v <= 65536 && spent < cap; v *= 2) hints.push(v);
+      const batches = chunk(hints, BATCH_SIZE);
+      for (const b of batches) {
+        const hit = await probe1155Multicall(user, b);
+        spent += b.length;
         if (hit !== null) return hit;
-        if (b % YIELD_EVERY === 0) await sleep(0);
-        if (probes >= PROBES_CAP) return null;
+        if (spent >= cap) return null;
+        await sleep(0);
       }
     }
 
     return null;
   }
 
-  /* ===== send helpers ===== */
+  /* ===== send helpers (with visible tx + timeout) ===== */
+
+  async function waitReceipt(hash: `0x${string}`) {
+    // wait with timeout; if times out, show "still pending…" but do not error hard
+    try {
+      const rcpt = await pc.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 });
+      return rcpt;
+    } catch (e) {
+      append("⏳ Still pending… You can keep this panel open; it will confirm soon.");
+      return null;
+    }
+  }
 
   async function sendErc721ById(idNum: number) {
     if (!isConnected || VAULT === zeroAddress || !address) return;
-    setBusy(true); setLog("");
+    setBusy(true); setLog(""); setTx(null);
     try {
       try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {}
-      const txHash = await writeContract(cfg, {
+      const hash = await writeContract(cfg, {
         abi: ERC721_WRITE_ABI,
         address: ALLOWED_CONTRACT as `0x${string}`,
         functionName: "safeTransferFrom",
         args: [address, VAULT as `0x${string}`, BigInt(idNum)],
-        account: address,
-        chainId: MONAD_CHAIN_ID,
+        account: address, chainId: MONAD_CHAIN_ID,
       });
-      const pc = getPublicClient(cfg, { chainId: MONAD_CHAIN_ID });
-      const receipt = await pc.waitForTransactionReceipt({ hash: txHash });
-      if (receipt.status === "success") {
+      setTx(hash);
+      append(`Tx sent: ${hash}`);
+      const rcpt = await waitReceipt(hash);
+      if (rcpt && rcpt.status === "success") {
         window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address } }));
+        append("✓ Confirmed");
       }
     } catch (e:any) {
-      console.error(e);
-      setLog(e?.shortMessage || e?.message || "send failed");
+      append(e?.shortMessage || e?.message || "send failed");
     } finally {
       setBusy(false);
     }
@@ -380,25 +359,25 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
 
   async function sendErc1155ById(idNum: number) {
     if (!isConnected || VAULT === zeroAddress || !address) return;
-    setBusy(true); setLog("");
+    setBusy(true); setLog(""); setTx(null);
     try {
       try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {}
-      const txHash = await writeContract(cfg, {
+      const hash = await writeContract(cfg, {
         abi: ERC1155_ABI,
         address: ALLOWED_CONTRACT as `0x${string}`,
         functionName: "safeTransferFrom",
         args: [address, VAULT as `0x${string}`, BigInt(idNum), 1n, "0x"],
-        account: address,
-        chainId: MONAD_CHAIN_ID,
+        account: address, chainId: MONAD_CHAIN_ID,
       });
-      const pc = getPublicClient(cfg, { chainId: MONAD_CHAIN_ID });
-      const receipt = await pc.waitForTransactionReceipt({ hash: txHash });
-      if (receipt.status === "success") {
+      setTx(hash);
+      append(`Tx sent: ${hash}`);
+      const rcpt = await waitReceipt(hash);
+      if (rcpt && rcpt.status === "success") {
         window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address } }));
+        append("✓ Confirmed");
       }
     } catch (e:any) {
-      console.error(e);
-      setLog(e?.shortMessage || e?.message || "send failed");
+      append(e?.shortMessage || e?.message || "send failed");
     } finally {
       setBusy(false);
     }
@@ -408,59 +387,64 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
 
   async function sendOne() {
     if (!isConnected || VAULT === zeroAddress || !address) return;
-    setBusy(true); setLog("");
+    setBusy(true); setLog(""); setTx(null);
 
     try {
       try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {}
 
+      // Try ERC-721 first (or unknown)
       if (std === "ERC721" || std === "UNKNOWN") {
         const id = await pickAnyErc721(address as `0x${string}`);
         if (id !== null) {
-          const txHash = await writeContract(cfg, {
+          const hash = await writeContract(cfg, {
             abi: ERC721_WRITE_ABI,
             address: ALLOWED_CONTRACT as `0x${string}`,
             functionName: "safeTransferFrom",
             args: [address, VAULT as `0x${string}`, id],
-            account: address,
-            chainId: MONAD_CHAIN_ID,
+            account: address, chainId: MONAD_CHAIN_ID,
           });
-          const pc = getPublicClient(cfg, { chainId: MONAD_CHAIN_ID });
-          const receipt = await pc.waitForTransactionReceipt({ hash: txHash });
-          if (receipt.status === "success") {
+          setTx(hash);
+          append(`Tx sent: ${hash}`);
+          const rcpt = await waitReceipt(hash);
+          if (rcpt && rcpt.status === "success") {
             window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address } }));
+            append("✓ Confirmed");
           }
           return;
         }
       }
 
+      // Try ERC-1155
       const id1155 = await pickAnyErc1155(address as `0x${string}`);
       if (id1155 !== null) {
-        const txHash = await writeContract(cfg, {
+        const hash = await writeContract(cfg, {
           abi: ERC1155_ABI,
           address: ALLOWED_CONTRACT as `0x${string}`,
           functionName: "safeTransferFrom",
           args: [address, VAULT as `0x${string}`, id1155, 1n, "0x"],
-          account: address,
-          chainId: MONAD_CHAIN_ID,
+          account: address, chainId: MONAD_CHAIN_ID,
         });
-        const pc = getPublicClient(cfg, { chainId: MONAD_CHAIN_ID });
-        const receipt = await pc.waitForTransactionReceipt({ hash: txHash });
-        if (receipt.status === "success") {
+        setTx(hash);
+        append(`Tx sent: ${hash}`);
+        const rcpt = await waitReceipt(hash);
+        if (rcpt && rcpt.status === "success") {
           window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address } }));
+          append("✓ Confirmed");
         }
         return;
       }
 
-      setLog("No owned NFT found in allowed collection.");
+      append("No owned NFT found in allowed collection.");
     } catch (e:any) {
-      console.error(e);
-      setLog(e?.shortMessage || e?.message || "send failed");
+      append(e?.shortMessage || e?.message || "send failed");
     } finally {
       setBusy(false);
     }
   }
 
   /* ===== UI ===== */
+
+  const txLink = tx && EXPLORER ? `${EXPLORER.replace(/\/+$/, "")}/tx/${tx}` : null;
 
   if (mode === "cta") {
     return (
@@ -471,6 +455,11 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
         <div className="helper" style={{ marginTop:10 }}>
           Sends one NFT from <span className="pill">{ALLOWED_CONTRACT.slice(0,6)}…{ALLOWED_CONTRACT.slice(-4)}</span> to the vault.
         </div>
+        {tx && (
+          <div className="muted" style={{ marginTop: 8 }}>
+            Tx: <code>{tx}</code>{txLink ? <> • <a href={txLink} target="_blank" rel="noreferrer">Open in explorer</a></> : null}
+          </div>
+        )}
         {log && <div className="log" style={{marginTop:12}}><pre>{log}</pre></div>}
       </div>
     );
@@ -484,10 +473,11 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
       <div className="mb-2 text-sm muted">
         Allowed: <span className="font-mono">{ALLOWED_CONTRACT}</span>
       </div>
+
       <div className="mb-2 text-xs muted" style={{display:"flex", gap:8, alignItems:"center"}}>
         <span>Scan mode:</span>
-        <button className={`btn ${modeScan==="balanced"?"":"btn-ghost"}`} onClick={()=>setModeScan("balanced")}>Balanced</button>
         <button className={`btn ${modeScan==="fast"?"":"btn-ghost"}`} onClick={()=>setModeScan("fast")}>Fast</button>
+        <button className={`btn ${modeScan==="balanced"?"":"btn-ghost"}`} onClick={()=>setModeScan("balanced")}>Balanced</button>
       </div>
 
       <div className="mb-3 text-lg card-title">Send 1 NFT to Vault → get 1 life</div>
@@ -495,18 +485,13 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
         {busy ? "Sending…" : "Send automatically"}
       </button>
 
-      {/* Manual ID fallback (safe, optional) */}
+      {/* Manual ID lane (instant path; avoids scan) */}
       <div className="mt-3" style={{ display:"grid", gap:8, gridTemplateColumns:"1fr 1fr" }}>
         <div className="card" style={{ padding: 8 }}>
           <div className="mb-2" style={{ fontWeight: 600 }}>ERC-721: send by tokenId</div>
           <div style={{ display:"flex", gap:8 }}>
-            <input
-              className="input"
-              type="number"
-              placeholder="tokenId (e.g., 0…9999)"
-              value={manualId721}
-              onChange={(e)=>setManualId721(e.target.value)}
-            />
+            <input className="input" type="number" placeholder="tokenId (0…9999)"
+                   value={manualId721} onChange={(e)=>setManualId721(e.target.value)} />
             <button className="btn" disabled={!manualId721 || busy} onClick={()=>sendErc721ById(Number(manualId721))}>
               Send
             </button>
@@ -515,13 +500,8 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
         <div className="card" style={{ padding: 8 }}>
           <div className="mb-2" style={{ fontWeight: 600 }}>ERC-1155: send by id</div>
           <div style={{ display:"flex", gap:8 }}>
-            <input
-              className="input"
-              type="number"
-              placeholder="id"
-              value={manualId1155}
-              onChange={(e)=>setManualId1155(e.target.value)}
-            />
+            <input className="input" type="number" placeholder="id"
+                   value={manualId1155} onChange={(e)=>setManualId1155(e.target.value)} />
             <button className="btn" disabled={!manualId1155 || busy} onClick={()=>sendErc1155ById(Number(manualId1155))}>
               Send
             </button>
@@ -529,6 +509,11 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
         </div>
       </div>
 
+      {tx && (
+        <div className="muted" style={{ marginTop: 8 }}>
+          Tx: <code>{tx}</code>{txLink ? <> • <a href={txLink} target="_blank" rel="noreferrer">Open in explorer</a></> : null}
+        </div>
+      )}
       <div className="mt-3 log">
         <div className="mb-1" style={{fontWeight:600}}>Log</div>
         <pre>{log || "—"}</pre>
