@@ -511,17 +511,19 @@ export default function Tamagotchi({
     window.dispatchEvent(new CustomEvent("wg:new-game"));
   };
 
-  /** Автосписание жизни при смерти: списываем и сразу рестартим */
-  useEffect(() => {
-    if (isDead && lives > 0 && !lifeSpentForThisDeath) {
-      onLoseLife();
-      setLifeSpentForThisDeath(true);
-      performReset(); // моментальный новый раунд
-    }
-    if (isDead) {
-      window.dispatchEvent(new CustomEvent("wg:pet-dead"));
-    }
-  }, [isDead]); // eslint-disable-line react-hooks/exhaustive-deps
+ /** Смерть: ждём, пока появится жизнь. Как только lives > 0 — списываем 1 и ресет. */
+useEffect(() => {
+  if (!isDead) return;
+
+  // уведомляем внешний мир (HUD, App)
+  window.dispatchEvent(new CustomEvent("wg:pet-dead"));
+
+  if (lives > 0 && !lifeSpentForThisDeath) {
+    onLoseLife();                 // списываем 1 жизнь в App/localStorage
+    setLifeSpentForThisDeath(true);
+    performReset();               // начинаем новую игру
+  }
+}, [isDead, lives]); // важно следить за lives!
 
   /** Drains / online catastrophes */
   useEffect(() => {
@@ -670,6 +672,31 @@ export default function Tamagotchi({
         const dy = Math.floor((LOGICAL_H - dh) / 2);
         ctx.drawImage(bg, dx, dy, dw, dh);
       }
+// Food animation (top-left, draws over background)
+const curFood = foodAnimRef.current;
+if (curFood) {
+  const elapsed = Date.now() - curFood.startedAt; // важно: Date.now()
+  if (elapsed >= FEED_ANIM_TOTAL_MS) {
+    setFoodAnim(null);
+  } else {
+    const idx = Math.min(
+      FEED_FRAMES_COUNT - 1,
+      Math.floor((elapsed / FEED_ANIM_TOTAL_MS) * FEED_FRAMES_COUNT)
+    );
+    const list = FEED_FRAMES[curFood.kind];
+    const src = list[idx];
+    const img = images[src];
+    if (img) {
+      const nativeMax = Math.max(img.width, img.height);
+      const scale =
+        nativeMax > FOOD_FRAME_MAX_PX ? FOOD_FRAME_MAX_PX / nativeMax : 1;
+      const fw = Math.round(img.width * scale);
+      const fh = Math.round(img.height * scale);
+      const fx = 8, fy = 8; // верхний левый угол
+      ctx.drawImage(img, fx, fy, fw, fh);
+    }
+  }
+}
 
       // --- Top-right avatar ---
       const nowAbs = Date.now();
@@ -699,18 +726,22 @@ export default function Tamagotchi({
         (ctx as any).imageSmoothingEnabled = false;
         ctx.drawImage(av, ax, ay, aw, ah);
 
-        const hp = Math.round((statsRef.current.health ?? 0) * 100);
-        const label = `❤️ ${hp}%`;
-        ctx.font = "10px monospace";
-        ctx.textBaseline = "alphabetic";
-        const tw = ctx.measureText(label).width;
-        const tx = ax + aw - tw - 2;
-        const ty = ay + ah - 4;
-        ctx.lineWidth = 3;
-        ctx.strokeStyle = "rgba(0,0,0,0.75)";
-        ctx.strokeText(label, tx, ty);
-        ctx.fillStyle = "#fff";
-        ctx.fillText(label, tx, ty);
+        // HP label BELOW the avatar (not overlapping)
+const hp = Math.round((statsRef.current.health ?? 0) * 100);
+const label = `❤️ ${hp}%`;
+ctx.font = "10px monospace";
+ctx.textBaseline = "top";
+const tw = ctx.measureText(label).width;
+const tx = ax + aw - tw - 2;
+// на 2px ниже низа аватарки, но не вылезаем за канву
+const ty = Math.min(ay + ah + 2, LOGICAL_H - 14);
+
+ctx.lineWidth = 3;
+ctx.strokeStyle = "rgba(0,0,0,0.75)";
+ctx.strokeText(label, tx, ty);
+ctx.fillStyle = "#fff";
+ctx.fillText(label, tx, ty);
+
       }
 
       // World layer (shifted down)
@@ -859,6 +890,46 @@ export default function Tamagotchi({
 
   /** Clipboard helper */
   const copyAddr = async () => { try { await navigator.clipboard.writeText(NFT_CONTRACT); } catch {} };
+/** Death overlay — ждём on-chain подтверждения, без автоперезапуска */
+const DeathOverlay = isDead ? (
+  <OverlayCard>
+    <div style={{ fontSize: 18, marginBottom: 6 }}>Your pet has died</div>
+    {deathReason && (
+      <div className="muted" style={{ marginBottom: 10 }}>
+        Cause: {deathReason}
+      </div>
+    )}
+
+    <div className="muted" style={{ marginBottom: 8 }}>
+      Send <b>1 NFT</b> to revive:
+    </div>
+
+    <code style={{ fontSize: 12, marginBottom: 8, display: "block" }}>
+      {NFT_CONTRACT}
+    </code>
+
+    <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+      <button className="btn" onClick={copyAddr}>Copy address</button>
+      {/* опционально: просим верхний уровень открыть свой модал/панель */}
+      <button
+        className="btn"
+        onClick={() =>
+          window.dispatchEvent(
+            new CustomEvent("wg:request-nft", {
+              detail: { to: NFT_CONTRACT, address: walletAddress },
+            })
+          )
+        }
+      >
+        Open vault
+      </button>
+    </div>
+
+    <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
+      Waiting for on-chain confirmation…
+    </div>
+  </OverlayCard>
+) : null;
 
   /** ===== UI ===== */
   return (
@@ -879,7 +950,8 @@ export default function Tamagotchi({
           borderRadius: 12, margin: "0 auto",
         }}
       >
-        <canvas ref={canvasRef} style={{ display: "block", imageRendering: "pixelated", background: "transparent", borderRadius: 12 }} />
+        <canvas ref={canvasRef} style={{ display: "block", imageRendering: "pixelated", background: "transparent", borderRadius: 12 }} /> 
+        {DeathOverlay}
       </div>
 
       {/* Status bars */}
