@@ -5,12 +5,14 @@ import { zeroAddress } from "viem";
 import { useAccount, useConfig, useSwitchChain } from "wagmi";
 import { readContract, writeContract, getPublicClient } from "@wagmi/core";
 
-/** VaultPanel (instant lookup via BlockVision + safe on-chain fallback)
- * - Instant indexer-first: fetch owned NFTs from BlockVision (key-in-URL).
- * - Fallback: light on-chain probe (no multicall dependency; works on Monad testnet).
- * - Manual send by ID for both ERC-721 and ERC-1155.
+/** VaultPanel (BlockVision instant lookup + throttled; safe on-chain fallback)
+ * - Indexer-first: fetch owned NFTs from BlockVision (key-in-URL in VITE_BV_HTTP).
+ * - Throttled (single-flight + cooldown) to avoid 429.
+ * - Local cache per address+contract for snappy revisits.
+ * - Optional on-chain fallback for ERC-721 (can be disabled via Speed mode).
+ * - Manual send by ID (ERC-721/1155).
  * - Emits "wg:nft-confirmed" on success (your game listens to it).
- * - Public API unchanged: export default function VaultPanel({ mode = "full" | "cta" }).
+ * - Public API unchanged: <VaultPanel mode="full" | "cta" />
  */
 
 export default function VaultPanel({ mode = "full" }: { mode?: "full" | "cta" }) {
@@ -22,7 +24,7 @@ const MONAD_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 const ALLOWED_CONTRACT = "0x88c78d5852f45935324c6d100052958f694e8446"; // allowed collection
 const VAULT = (import.meta.env.VITE_VAULT_ADDRESS as string) || zeroAddress;
 
-// BlockVision (key-in-URL) base; example: https://monad-testnet.blockvision.org/v1/<KEY>
+// BlockVision (key-in-URL) base; e.g. https://monad-testnet.blockvision.org/v1/<KEY>
 const BV_HTTP = (import.meta.env.VITE_BV_HTTP as string | undefined)?.replace(/\/+$/, "") || "";
 
 // Optional explorer for tx links
@@ -31,7 +33,13 @@ const EXPLORER = (import.meta.env.VITE_EXPLORER_URL as string | undefined) || ""
 /* ---- Probe tuning (fallback only; indexer is primary) ---- */
 const DEFAULT_TOP_GUESS = 10_000; // you said there are 10k ids
 const BATCH_SIZE = 24;            // parallel calls per batch
-const YIELD_EVERY = 6;            // cooperative yielding cadence
+
+/* ---- Indexer throttling (prevent 429) ---- */
+const INDEXER_MIN_COOLDOWN_MS = 15_000; // minimal delay between attempts
+
+// Single-flight holders (module-level)
+const _inflightByKey = new Map<string, Promise<IndexedToken[] | null>>();
+const _lastFetchAtByKey = new Map<string, number>();
 
 /* ===== ABIs ===== */
 const ERC165_ABI = [
@@ -84,6 +92,23 @@ const getLives = (cid:number, addr?:string|null) => {
 type Std = "ERC721" | "ERC1155" | "UNKNOWN";
 type IndexedToken = { standard: "ERC721" | "ERC1155"; tokenId: bigint };
 
+/* ===== Small helpers ===== */
+function sleep(ms:number){ return new Promise(r=>setTimeout(r,ms)); }
+function range(start: number, end: number, step = 1): number[] {
+  const out: number[] = [];
+  if (step > 0) for (let i = start; i <= end; i += step) out.push(i);
+  else for (let i = start; i >= end; i += step) out.push(i);
+  return out;
+}
+function chunk<T>(arr: T[], sz: number): T[][] {
+  const res: T[][] = [];
+  for (let i = 0; i < arr.length; i += sz) res.push(arr.slice(i, i + sz));
+  return res;
+}
+function bvCacheKey(addr: string) {
+  return `wg_bv_cache_${MONAD_CHAIN_ID}_${ALLOWED_CONTRACT.toLowerCase()}_${addr.toLowerCase()}`;
+}
+
 function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
   const cfg = useConfig();
   const pc = useMemo(() => getPublicClient(cfg, { chainId: MONAD_CHAIN_ID }), [cfg]);
@@ -102,6 +127,15 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
 
   // Cached list from indexer
   const [indexed, setIndexed] = useState<IndexedToken[] | null>(null);
+
+  // Speed mode: skip on-chain fallback if indexer is empty
+  const SPEED_MODE_KEY = "wg_speed_mode_v1";
+  const [speedMode, setSpeedMode] = useState<boolean>(() => {
+    try { return localStorage.getItem(SPEED_MODE_KEY) === "1"; } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(SPEED_MODE_KEY, speedMode ? "1" : "0"); } catch {}
+  }, [speedMode]);
 
   function append(s: string) { setLog((p) => (p ? p + "\n" : "") + s); }
   const canSend = isConnected && VAULT !== zeroAddress;
@@ -136,72 +170,113 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ALLOWED_CONTRACT]);
 
-  /* ===== Instant lookup via BlockVision (key-in-URL) ===== */
+  /* ===== Instant lookup via BlockVision (throttled; cached) ===== */
   async function fetchFromBlockvision(addr: string): Promise<IndexedToken[] | null> {
     if (!BV_HTTP) return null;
+    const url = `${BV_HTTP}/account/nfts?address=${addr}&pageIndex=1&verified=false&unknown=true`;
+    const cacheK = bvCacheKey(addr);
 
-    // BlockVision: GET /account/nfts?address=0x..&pageIndex=1&verified=false&unknown=true
-    const buildUrl = (pageIndex:number) =>
-      `${BV_HTTP}/account/nfts?address=${addr}&pageIndex=${pageIndex}&verified=false&unknown=true`;
+    // Serve from cache if present (fast path)
+    try {
+      const raw = localStorage.getItem(cacheK);
+      if (raw) {
+        const arr = JSON.parse(raw) as { s: "721" | "1155"; id: string }[];
+        if (Array.isArray(arr) && arr.length) {
+          return arr.map(x => ({ standard: x.s === "1155" ? "ERC1155" : "ERC721", tokenId: BigInt(x.id) }));
+        }
+      }
+    } catch {}
 
-    const out: IndexedToken[] = [];
-    let page = 1;
-    let guard = 10; // safety for pagination loops
+    // Minimal cooldown between attempts
+    const now = Date.now();
+    const last = _lastFetchAtByKey.get(cacheK) ?? 0;
+    if (now - last < INDEXER_MIN_COOLDOWN_MS) {
+      return null;
+    }
 
-    while (guard-- > 0) {
-      const r = await fetch(buildUrl(page), { headers: { accept: "application/json" } });
-      if (!r.ok) break;
-      const j: any = await r.json();
+    // Single-flight: reuse ongoing promise
+    if (_inflightByKey.has(cacheK)) {
+      try { return await _inflightByKey.get(cacheK)!; } catch { /* fallthrough */ }
+    }
+
+    const p = (async () => {
+      _lastFetchAtByKey.set(cacheK, Date.now());
+      let res: Response | null = null;
+      try {
+        res = await fetch(url, { headers: { accept: "application/json" } });
+      } catch {
+        _inflightByKey.delete(cacheK);
+        return null;
+      }
+
+      // Rate-limited handling
+      if (!res.ok) {
+        if (res.status === 429) {
+          const ra = res.headers.get("Retry-After");
+          const waitMs = ra ? Math.max(1000, Number(ra) * 1000) : INDEXER_MIN_COOLDOWN_MS;
+          _lastFetchAtByKey.set(cacheK, Date.now() + waitMs);
+        }
+        _inflightByKey.delete(cacheK);
+        return null;
+      }
+
+      let j: any = null;
+      try { j = await res.json(); } catch {
+        _inflightByKey.delete(cacheK);
+        return null;
+      }
 
       const cols = j?.result?.data;
-      if (!Array.isArray(cols)) break;
+      if (!Array.isArray(cols)) {
+        try { localStorage.setItem(cacheK, "[]"); } catch {}
+        _inflightByKey.delete(cacheK);
+        return [];
+      }
 
+      const out: IndexedToken[] = [];
       for (const col of cols) {
         const ca = String(col?.contractAddress || "").toLowerCase();
-        const std = String(col?.ercStandard || "").toUpperCase(); // "ERC721" | "ERC1155"
         if (ca !== ALLOWED_CONTRACT.toLowerCase()) continue;
+        const std0 = String(col?.ercStandard || "").toUpperCase(); // "ERC721" | "ERC1155"
         const items = Array.isArray(col?.items) ? col.items : [];
         for (const it of items) {
           const idRaw = it?.tokenId ?? it?.token_id ?? it?.id;
           if (idRaw == null) continue;
-          try {
-            out.push({ standard: (std === "ERC1155" ? "ERC1155" : "ERC721"), tokenId: BigInt(String(idRaw)) });
-          } catch {}
+          try { out.push({ standard: (std0 === "ERC1155" ? "ERC1155" : "ERC721"), tokenId: BigInt(String(idRaw)) }); } catch {}
         }
+        // Only our contract matters
+        break;
       }
 
-      const next = j?.result?.nextPageIndex;
-      if (!next || next === page) break;
-      const n = Number(next);
-      if (!Number.isFinite(n) || n < 1) break;
-      page = n;
-    }
+      // Save compact cache (even empty -> avoids re-hammering)
+      try {
+        const compact = out.map(t => ({ s: t.standard === "ERC1155" ? "1155" : "721", id: t.tokenId.toString() }));
+        localStorage.setItem(cacheK, JSON.stringify(compact.slice(0, 64)));
+      } catch {}
 
-    return out;
+      _inflightByKey.delete(cacheK);
+      return out;
+    })();
+
+    _inflightByKey.set(cacheK, p);
+    return p;
   }
 
-  // Load index on address change
+  // Load index on address change (do not refetch if we already have a list)
   useEffect(() => {
+    let alive = true;
     (async () => {
       if (!address) { setIndexed(null); return; }
+      if (indexed && indexed.length) return; // already have tokens
       const list = await fetchFromBlockvision(address);
-      if (list) setIndexed(list);
+      if (!alive) return;
+      if (Array.isArray(list)) setIndexed(list);
     })();
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [address]);
 
-  /* ===== On-chain fallback (only if index is empty/unset) ===== */
-  const sleep = (ms:number)=>new Promise(r=>setTimeout(r,ms));
-  function range(start: number, end: number, step = 1): number[] {
-    const out: number[] = [];
-    if (step > 0) for (let i = start; i <= end; i += step) out.push(i);
-    else for (let i = start; i >= end; i += step) out.push(i);
-    return out;
-  }
-  function chunk<T>(arr: T[], sz: number): T[][] {
-    const res: T[][] = [];
-    for (let i = 0; i < arr.length; i += sz) res.push(arr.slice(i, i + sz));
-    return res;
-  }
+  /* ===== On-chain fallback (ERC-721 only; optional) ===== */
   async function supportsEnumerable(): Promise<boolean> {
     try {
       return await readContract(cfg, {
@@ -294,20 +369,24 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     }
     return null;
   }
-  async function pickAnyErc1155(_user: `0x${string}`) {
-    // We rely on indexer for 1155. Manual send by ID is available.
-    return null;
-  }
 
-  /* ===== send + wait receipt ===== */
+  /* ===== send + wait receipt (non-blocking UI) ===== */
   async function waitReceipt(hash: `0x${string}`) {
     try {
-      const rcpt = await pc.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 });
+      // 0 confirmations -> as soon as it's mined; short timeout for snappy UX
+      const rcpt = await pc.waitForTransactionReceipt({ hash, confirmations: 0, timeout: 45_000 });
       return rcpt;
     } catch {
-      append("⏳ Still pending… keep this panel open; it should confirm soon.");
+      append("⏳ Still pending… you can keep playing; it should confirm shortly.");
       return null;
     }
+  }
+
+  function onSuccess(addressNow?: string) {
+    // Invalidate index cache and notify the app to grant a life
+    const who = addressNow || address;
+    if (who) { try { localStorage.removeItem(bvCacheKey(who)); } catch {} }
+    window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address: who } }));
   }
 
   async function sendErc721ById(idNum: number) {
@@ -323,13 +402,14 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
         account: address, chainId: MONAD_CHAIN_ID,
       });
       setTx(hash);
-      const rcpt = await waitReceipt(hash);
-      if (rcpt && rcpt.status === "success") {
-        window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address } }));
-      }
+      setBusy(false); // unlock UI immediately
+      waitReceipt(hash).then((rcpt) => {
+        if (rcpt && rcpt.status === "success") onSuccess(address);
+      });
     } catch (e:any) {
+      setBusy(false);
       append(e?.shortMessage || e?.message || "send failed");
-    } finally { setBusy(false); }
+    }
   }
 
   async function sendErc1155ById(idNum: number) {
@@ -345,16 +425,17 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
         account: address, chainId: MONAD_CHAIN_ID,
       });
       setTx(hash);
-      const rcpt = await waitReceipt(hash);
-      if (rcpt && rcpt.status === "success") {
-        window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address } }));
-      }
+      setBusy(false);
+      waitReceipt(hash).then((rcpt) => {
+        if (rcpt && rcpt.status === "success") onSuccess(address);
+      });
     } catch (e:any) {
+      setBusy(false);
       append(e?.shortMessage || e?.message || "send failed");
-    } finally { setBusy(false); }
+    }
   }
 
-  /* ===== main flow: indexer-first, then fallback ===== */
+  /* ===== main flow: indexer-first, then optional fallback ===== */
   async function sendOne() {
     if (!isConnected || VAULT === zeroAddress || !address) return;
     setBusy(true); setLog(""); setTx(null);
@@ -366,7 +447,6 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
       let list = indexed;
       if (!list) list = await fetchFromBlockvision(address);
       if (list && list.length) {
-        // prefer an ERC-721 first, then ERC-1155
         const pick = list.find(t => t.standard === "ERC721") ?? list.find(t => t.standard === "ERC1155");
         if (pick) {
           if (pick.standard === "ERC721") {
@@ -378,11 +458,11 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
               account: address, chainId: MONAD_CHAIN_ID,
             });
             setTx(hash);
-            const rcpt = await waitReceipt(hash);
-            if (rcpt && rcpt.status === "success") {
-              window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address } }));
-            }
-            setBusy(false); return;
+            setBusy(false);
+            waitReceipt(hash).then((rcpt) => {
+              if (rcpt && rcpt.status === "success") onSuccess(address);
+            });
+            return;
           } else {
             const hash = await writeContract(cfg, {
               abi: ERC1155_ABI,
@@ -392,38 +472,40 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
               account: address, chainId: MONAD_CHAIN_ID,
             });
             setTx(hash);
-            const rcpt = await waitReceipt(hash);
-            if (rcpt && rcpt.status === "success") {
-              window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address } }));
-            }
-            setBusy(false); return;
+            setBusy(false);
+            waitReceipt(hash).then((rcpt) => {
+              if (rcpt && rcpt.status === "success") onSuccess(address);
+            });
+            return;
           }
         }
       }
 
-      // 2) Fallback: quick on-chain pick for ERC-721
-      const id = await pickAnyErc721(address as `0x${string}`);
-      if (id !== null) {
-        const hash = await writeContract(cfg, {
-          abi: ERC721_WRITE_ABI,
-          address: ALLOWED_CONTRACT as `0x${string}`,
-          functionName: "safeTransferFrom",
-          args: [address, VAULT as `0x${string}`, id],
-          account: address, chainId: MONAD_CHAIN_ID,
-        });
-        setTx(hash);
-        const rcpt = await waitReceipt(hash);
-        if (rcpt && rcpt.status === "success") {
-          window.dispatchEvent(new CustomEvent("wg:nft-confirmed", { detail: { address } }));
+      // 2) Optional on-chain fallback (ERC-721)
+      if (!speedMode) {
+        const id = await pickAnyErc721(address as `0x${string}`);
+        if (id !== null) {
+          const hash = await writeContract(cfg, {
+            abi: ERC721_WRITE_ABI,
+            address: ALLOWED_CONTRACT as `0x${string}`,
+            functionName: "safeTransferFrom",
+            args: [address, VAULT as `0x${string}`, id],
+            account: address, chainId: MONAD_CHAIN_ID,
+          });
+          setTx(hash);
+          setBusy(false);
+          waitReceipt(hash).then((rcpt) => {
+            if (rcpt && rcpt.status === "success") onSuccess(address);
+          });
+          return;
         }
-        setBusy(false); return;
       }
 
-      append("No owned NFT found in allowed collection.");
-    } catch (e:any) {
-      append(e?.shortMessage || e?.message || "send failed");
-    } finally {
+      append("No owned NFT found via indexer. Use 'send by tokenId' (ERC-721) or 'send by id' (ERC-1155).");
       setBusy(false);
+    } catch (e:any) {
+      setBusy(false);
+      append(e?.shortMessage || e?.message || "send failed");
     }
   }
 
@@ -457,13 +539,20 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
 
       {BV_HTTP ? (
         <div className="mb-2 text-xs muted">
-          Indexer: <span className="font-mono">{BV_HTTP}/account/nfts</span> (instant lookup)
+          Indexer: <span className="font-mono">{BV_HTTP}/account/nfts</span> (instant lookup, throttled)
         </div>
       ) : (
         <div className="mb-2 text-xs" style={{ color: "#ffb86b" }}>
           No BlockVision endpoint (VITE_BV_HTTP). Falling back to on-chain probe.
         </div>
       )}
+
+      <div className="mb-2 text-xs muted" style={{display:"flex", gap:8, alignItems:"center"}}>
+        <label style={{display:"flex", gap:6, alignItems:"center", cursor:"pointer"}}>
+          <input type="checkbox" checked={speedMode} onChange={(e)=>setSpeedMode(e.target.checked)} />
+          Speed mode (skip on-chain fallback)
+        </label>
+      </div>
 
       <div className="mb-3 text-lg card-title">Send 1 NFT to Vault → get 1 life</div>
       <button className="btn btn-primary" disabled={!canSend || busy} onClick={sendOne}>
