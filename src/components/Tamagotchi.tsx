@@ -3,15 +3,13 @@ import { catalog, type FormKey, type AnimSet as AnyAnimSet } from "../game/catal
 
 /** ===== Constants ===== */
 const DEAD_FALLBACK = "/sprites/dead.png";
-
-// full vault contract address (non-shortened)
 const NFT_CONTRACT = "0x88c78d5852f45935324c6d100052958f694e8446";
 
-/** HUD / food: soft max logical px (no upscale beyond) */
+/** HUD / food */
 const AVATAR_SCALE_CAP: number | null = 42;
 const FOOD_FRAME_MAX_PX = 42;
 
-/** Unified target heights inside world (before flip/offset) */
+/** Target heights */
 const EGG_TARGET_H = 26;
 const CHILD_TARGET_H = 34;
 const ADULT_TARGET_H = 42;
@@ -62,18 +60,16 @@ const FPS = 6, WALK_SPEED = 42;
 const MAX_W = 720, CANVAS_H = 360;
 const BAR_H = 6, BASE_GROUND = 48, Y_SHIFT = 26;
 
-/** Extra vertical adjustments */
-const EXTRA_DOWN = 10;       // poops & scoop lower by 10px
-// подняли питомцев на 27 px вверх относительно предыдущего положения (-26 вниз ранее)
-// формула: iy = baseline - drawH - PET_RAISE
-// здесь PET_RAISE = 1 даёт чистый подъём на 27 px от старого положения
+/** Vertical adjustments */
+const EXTRA_DOWN = 10;      // poops & scoop lower
+// питомца поднимаем вверх на 27 px относительно прежней логики
 const PET_RAISE  = 1;
 
 const HEAL_COOLDOWN_MS = 60_000;
 
 /** Food logic */
 const FEED_COOLDOWN_MS = 5_000;
-const FEED_ANIM_TOTAL_MS = 1200; // 2× slower (3 frames -> 400ms each)
+const FEED_ANIM_TOTAL_MS = 1200; // 3 * 400ms
 const FEED_FRAMES_COUNT = 3;
 const FEED_EFFECTS = {
   burger: { hunger: +0.28, happiness: +0.06 },
@@ -307,7 +303,7 @@ export default function Tamagotchi({
       localStorage.setItem(sk(CATA_SCHEDULE_KEY), JSON.stringify(schedule.slice(0, 4)));
       if (!consumed) localStorage.setItem(sk(CATA_CONSUMED_KEY), JSON.stringify([]));
     } catch {}
-  }, [startTs]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [startTs]); // eslint-disable-line react-hooks/ex exhaustive-deps
 
   /** Offline catch-up with death surfacing */
   useEffect(() => {
@@ -356,7 +352,7 @@ export default function Tamagotchi({
     } catch {}
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /** Age ticker (perf-based, stable) */
+  /** Age ticker */
   useEffect(() => {
     let lastPerf = performance.now();
     const id = window.setInterval(() => {
@@ -395,7 +391,7 @@ export default function Tamagotchi({
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /** Persist scalar keys */
+  /** Persist scalars */
   useEffect(() => { try { localStorage.setItem(sk(FORM_KEY), JSON.stringify(form)); } catch {} }, [form, addr]);
   useEffect(() => { try { localStorage.setItem(sk(STATS_KEY), JSON.stringify(stats)); } catch {} }, [stats, addr]);
   useEffect(() => { try { localStorage.setItem(sk(SICK_KEY), JSON.stringify(isSick)); } catch {} }, [isSick, addr]);
@@ -475,7 +471,7 @@ export default function Tamagotchi({
     },
   };
 
-  /** New game flow */
+  /** Reset (used only после получения новой жизни) */
   const performReset = () => {
     try {
       localStorage.removeItem(sk(START_TS_KEY));
@@ -511,19 +507,23 @@ export default function Tamagotchi({
     window.dispatchEvent(new CustomEvent("wg:new-game"));
   };
 
- /** Смерть: ждём, пока появится жизнь. Как только lives > 0 — списываем 1 и ресет. */
-useEffect(() => {
-  if (!isDead) return;
+  /** Смерть: списываем жизнь ОДИН раз, но НЕ перезапускаем игру автоматически */
+  useEffect(() => {
+    if (isDead && !lifeSpentForThisDeath) {
+      onLoseLife?.();                   // жизнь списывается (если была)
+      setLifeSpentForThisDeath(true);   // повторно не списываем
+      window.dispatchEvent(new CustomEvent("wg:pet-dead"));
+    }
+  }, [isDead]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // уведомляем внешний мир (HUD, App)
-  window.dispatchEvent(new CustomEvent("wg:pet-dead"));
-
-  if (lives > 0 && !lifeSpentForThisDeath) {
-    onLoseLife();                 // списываем 1 жизнь в App/localStorage
-    setLifeSpentForThisDeath(true);
-    performReset();               // начинаем новую игру
-  }
-}, [isDead, lives]); // важно следить за lives!
+  /** Когда пришла новая жизнь из VaultPanel (wg:nft-confirmed) — сразу начинаем новый раунд */
+  useEffect(() => {
+    const onConfirmed = () => {
+      if (deadRef.current) performReset();
+    };
+    window.addEventListener("wg:nft-confirmed", onConfirmed as any);
+    return () => window.removeEventListener("wg:nft-confirmed", onConfirmed as any);
+  }, []); // once
 
   /** Drains / online catastrophes */
   useEffect(() => {
@@ -644,7 +644,7 @@ useEffect(() => {
     else { window.addEventListener("resize", resize); }
     resize();
 
-    // ---- Motion vars (float physics; integer draw) ----
+    // ---- Motion vars ----
     const EDGE_EPS = 2;
     const TURN_COOLDOWN = 160; // ms
     let dir: 1 | -1 = 1;
@@ -672,31 +672,31 @@ useEffect(() => {
         const dy = Math.floor((LOGICAL_H - dh) / 2);
         ctx.drawImage(bg, dx, dy, dw, dh);
       }
-// Food animation (top-left, draws over background)
-const curFood = foodAnimRef.current;
-if (curFood) {
-  const elapsed = Date.now() - curFood.startedAt; // важно: Date.now()
-  if (elapsed >= FEED_ANIM_TOTAL_MS) {
-    setFoodAnim(null);
-  } else {
-    const idx = Math.min(
-      FEED_FRAMES_COUNT - 1,
-      Math.floor((elapsed / FEED_ANIM_TOTAL_MS) * FEED_FRAMES_COUNT)
-    );
-    const list = FEED_FRAMES[curFood.kind];
-    const src = list[idx];
-    const img = images[src];
-    if (img) {
-      const nativeMax = Math.max(img.width, img.height);
-      const scale =
-        nativeMax > FOOD_FRAME_MAX_PX ? FOOD_FRAME_MAX_PX / nativeMax : 1;
-      const fw = Math.round(img.width * scale);
-      const fh = Math.round(img.height * scale);
-      const fx = 8, fy = 8; // верхний левый угол
-      ctx.drawImage(img, fx, fy, fw, fh);
-    }
-  }
-}
+
+      // ----- Food animation (top-left) -----
+      const curFood = foodAnimRef.current;
+      if (curFood) {
+        const elapsed = Date.now() - curFood.startedAt;
+        if (elapsed >= FEED_ANIM_TOTAL_MS) {
+          setFoodAnim(null);
+        } else {
+          const idx = Math.min(
+            FEED_FRAMES_COUNT - 1,
+            Math.floor((elapsed / FEED_ANIM_TOTAL_MS) * FEED_FRAMES_COUNT)
+          );
+          const list = FEED_FRAMES[curFood.kind];
+          const src = list[idx];
+          const img = images[src];
+          if (img) {
+            const nativeMax = Math.max(img.width, img.height);
+            const scale = nativeMax > FOOD_FRAME_MAX_PX ? FOOD_FRAME_MAX_PX / nativeMax : 1;
+            const fw = Math.round(img.width * scale);
+            const fh = Math.round(img.height * scale);
+            const fx = 8, fy = 8;
+            ctx.drawImage(img, fx, fy, fw, fh);
+          }
+        }
+      }
 
       // --- Top-right avatar ---
       const nowAbs = Date.now();
@@ -726,25 +726,22 @@ if (curFood) {
         (ctx as any).imageSmoothingEnabled = false;
         ctx.drawImage(av, ax, ay, aw, ah);
 
-        // HP label BELOW the avatar (not overlapping)
-const hp = Math.round((statsRef.current.health ?? 0) * 100);
-const label = `❤️ ${hp}%`;
-ctx.font = "10px monospace";
-ctx.textBaseline = "top";
-const tw = ctx.measureText(label).width;
-const tx = ax + aw - tw - 2;
-// на 2px ниже низа аватарки, но не вылезаем за канву
-const ty = Math.min(ay + ah + 2, LOGICAL_H - 14);
-
-ctx.lineWidth = 3;
-ctx.strokeStyle = "rgba(0,0,0,0.75)";
-ctx.strokeText(label, tx, ty);
-ctx.fillStyle = "#fff";
-ctx.fillText(label, tx, ty);
-
+        // HP label BELOW the avatar (no overlap)
+        const hp = Math.round((statsRef.current.health ?? 0) * 100);
+        const label = `❤️ ${hp}%`;
+        ctx.font = "10px monospace";
+        ctx.textBaseline = "top";
+        const tw = ctx.measureText(label).width;
+        const tx = ax + aw - tw - 2;
+        const ty = Math.min(ay + ah + 2, LOGICAL_H - 14);
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "rgba(0,0,0,0.75)";
+        ctx.strokeText(label, tx, ty);
+        ctx.fillStyle = "#fff";
+        ctx.fillText(label, tx, ty);
       }
 
-      // World layer (shifted down)
+      // World layer
       ctx.save();
       ctx.translate(0, Y_SHIFT);
 
@@ -835,7 +832,7 @@ ctx.fillText(label, tx, ty);
           if (dir === -1) {
             ctx.save();
             ctx.scale(-1, 1);
-            ctx.drawImage(img, -(ix + drawW), iy, drawW, drawH); // зеркальный X
+            ctx.drawImage(img, -(ix + drawW), iy, drawW, drawH);
             ctx.restore();
           } else {
             ctx.drawImage(img, ix, iy, drawW, drawH);
@@ -866,13 +863,12 @@ ctx.fillText(label, tx, ty);
       if (cat && nowAbs < cat.until) drawBanner(ctx, LOGICAL_W, `⚠ ${cat.cause}! stats draining fast`);
       if (!deadRef.current && sleepingNow) drawBanner(ctx, LOGICAL_W, "😴 Sleeping");
 
-      ctx.restore(); // end shifted world
+      ctx.restore();
     };
 
     if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(loop);
 
-    // cleanup
     return () => {
       if (ro) ro.disconnect();
       else window.removeEventListener("resize", resize);
@@ -890,46 +886,28 @@ ctx.fillText(label, tx, ty);
 
   /** Clipboard helper */
   const copyAddr = async () => { try { await navigator.clipboard.writeText(NFT_CONTRACT); } catch {} };
-/** Death overlay — ждём on-chain подтверждения, без автоперезапуска */
-const DeathOverlay = isDead ? (
-  <OverlayCard>
-    <div style={{ fontSize: 18, marginBottom: 6 }}>Your pet has died</div>
-    {deathReason && (
-      <div className="muted" style={{ marginBottom: 10 }}>
-        Cause: {deathReason}
+
+  /** Death overlay (CTA → откроет модал VaultPanel в App через wg:request-nft) */
+  const DeathOverlay = isDead ? (
+    <OverlayCard>
+      <div style={{ fontSize: 18, marginBottom: 6 }}>Your pet has died</div>
+      {deathReason && <div className="muted" style={{ marginBottom: 12 }}>Cause: {deathReason}</div>}
+      <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+        <button
+          className="btn btn-primary"
+          onClick={() => {
+            window.dispatchEvent(
+              new CustomEvent("wg:request-nft", {
+                detail: { to: NFT_CONTRACT, address: walletAddress }
+              })
+            );
+          }}
+        >
+          Send 1 NFT → +1 life
+        </button>
       </div>
-    )}
-
-    <div className="muted" style={{ marginBottom: 8 }}>
-      Send <b>1 NFT</b> to revive:
-    </div>
-
-    <code style={{ fontSize: 12, marginBottom: 8, display: "block" }}>
-      {NFT_CONTRACT}
-    </code>
-
-    <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
-      <button className="btn" onClick={copyAddr}>Copy address</button>
-      {/* опционально: просим верхний уровень открыть свой модал/панель */}
-      <button
-        className="btn"
-        onClick={() =>
-          window.dispatchEvent(
-            new CustomEvent("wg:request-nft", {
-              detail: { to: NFT_CONTRACT, address: walletAddress },
-            })
-          )
-        }
-      >
-        Open vault
-      </button>
-    </div>
-
-    <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
-      Waiting for on-chain confirmation…
-    </div>
-  </OverlayCard>
-) : null;
+    </OverlayCard>
+  ) : null;
 
   /** ===== UI ===== */
   return (
@@ -950,7 +928,7 @@ const DeathOverlay = isDead ? (
           borderRadius: 12, margin: "0 auto",
         }}
       >
-        <canvas ref={canvasRef} style={{ display: "block", imageRendering: "pixelated", background: "transparent", borderRadius: 12 }} /> 
+        <canvas ref={canvasRef} style={{ display: "block", imageRendering: "pixelated", background: "transparent", borderRadius: 12 }} />
         {DeathOverlay}
       </div>
 
@@ -1069,7 +1047,7 @@ function safeReadJSON<T>(key: string): T | null {
   try { const raw = localStorage.getItem(key); if (!raw) return null; return JSON.parse(raw) as T; } catch { return null; }
 }
 
-/** Offline simulator (returns death flags and reason) */
+/** Offline simulator */
 function simulateOffline(args: {
   startWall: number; minutes: number; startAgeMs: number;
   startStats: Stats; startSick: boolean;
@@ -1137,7 +1115,6 @@ function simulateOffline(args: {
         break;
       }
 
-      // illness transitions per minute
       if (!sick) {
         const lowClean = 1 - s.cleanliness;
         const p = 0.02 + 0.3 * 0.3 + 0.2 * lowClean;
@@ -1159,6 +1136,15 @@ function Bar({ label, value, h = 6 }: { label: string; value: number; h?: number
       <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 4 }}>{label}</div>
       <div style={{ height: h, width: "100%", borderRadius: Math.max(6, h), background: "rgba(255,255,255,0.08)", overflow: "hidden" }}>
         <div style={{ width: `${pct}%`, height: "100%", background: "linear-gradient(90deg, rgba(124,77,255,0.9), rgba(0,200,255,0.9))" }} />
+      </div>
+    </div>
+  );
+}
+function OverlayCard({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", background: "rgba(0,0,0,0.45)", backdropFilter: "blur(2px)" }}>
+      <div className="card" style={{ padding: 14, borderRadius: 12, minWidth: 260, textAlign: "center", background: "rgba(10,10,18,0.85)", border: "1px solid rgba(255,255,255,0.12)" }}>
+        {children}
       </div>
     </div>
   );
