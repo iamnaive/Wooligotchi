@@ -72,7 +72,6 @@ const config = createConfig({
 const LIVES_KEY = "wg_lives_v1";
 const lKey = (cid: number, addr: string) => `${cid}:${addr.toLowerCase()}`;
 
-// Read lives from localStorage for current chain/account
 function getLivesLocal(cid: number, addr?: `0x${string}` | null) {
   if (!addr) return 0;
   try {
@@ -83,28 +82,6 @@ function getLivesLocal(cid: number, addr?: `0x${string}` | null) {
     return 0;
   }
 }
-
-// Subscribe to changes
-function useLivesGate(chainId: number | undefined, address?: `0x${string}` | null) {
-  const [lives, setLives] = React.useState(0);
-  React.useEffect(() => {
-    const cid = chainId ?? MONAD_CHAIN_ID;
-    setLives(getLivesLocal(cid, address));
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === LIVES_KEY) setLives(getLivesLocal(cid, address));
-    };
-    const onCustom = () => setLives(getLivesLocal(cid, address));
-    window.addEventListener("storage", onStorage);
-    window.addEventListener("wg:lives-changed", onCustom as any);
-    return () => {
-      window.removeEventListener("storage", onStorage);
-      window.removeEventListener("wg:lives-changed", onCustom as any);
-    };
-  }, [chainId, address]);
-  return lives;
-}
-
-// Decrease lives by one and notify listeners
 function spendOneLife(chainId: number | undefined, address?: `0x${string}` | null) {
   const cid = chainId ?? MONAD_CHAIN_ID;
   if (!address) return;
@@ -122,8 +99,6 @@ function spendOneLife(chainId: number | undefined, address?: `0x${string}` | nul
     console.error("spendOneLife failed", e);
   }
 }
-
-// Increase lives and notify listeners
 function grantLives(chainId: number | undefined, address?: `0x${string}` | null, count = 1) {
   const cid = chainId ?? MONAD_CHAIN_ID;
   if (!address || count <= 0) return;
@@ -145,112 +120,13 @@ function makeConfigFromForm(form: FormKey): PetConfig {
   return { name: "Tamagotchi", fps: 8, anims: catalog[form] };
 }
 
-/* ===== Evolution placeholders (kept from your build) ===== */
+/* ===== Evolution placeholders ===== */
 const FORM_KEY_STORAGE = "wg_form_v1";
 function loadForm(): FormKey {
   return (localStorage.getItem(FORM_KEY_STORAGE) as FormKey) || "egg";
 }
 function saveForm(f: FormKey) {
   localStorage.setItem(FORM_KEY_STORAGE, f);
-}
-function nextFormRandom(current: FormKey): FormKey {
-  if (current === "egg") return "egg_adult";
-  if (current === "egg_adult") {
-    const pool: FormKey[] = ["char1", "char2", "char3", "char4"];
-    return pool[Math.floor(Math.random() * pool.length)];
-  }
-  const map: Record<FormKey, FormKey> = {
-    egg: "egg_adult",
-    egg_adult: "char1",
-    char1: "char1_adult",
-    char1_adult: "char1_adult",
-    char2: "char2_adult",
-    char2_adult: "char2_adult",
-    char3: "char3_adult",
-    char3_adult: "char3_adult",
-    char4: "char4_adult",
-    char4_adult: "char4_adult",
-  };
-  return map[current] ?? current;
-}
-
-/* ===== Error Boundary ===== */
-class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { err: any }> {
-  constructor(props: any) {
-    super(props);
-    this.state = { err: null };
-  }
-  static getDerivedStateFromError(err: any) {
-    return { err };
-  }
-  componentDidCatch(err: any, info: any) {
-    console.error("UI crash:", err, info);
-  }
-  render() {
-    if (this.state.err) {
-      return (
-        <div className="card" style={{ margin: "16px auto", maxWidth: 880 }}>
-          <div style={{ fontWeight: 700, marginBottom: 6 }}>Render error</div>
-          <div style={{ whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: 12 }}>
-            {String(this.state.err?.message || this.state.err)}
-          </div>
-        </div>
-      );
-    }
-    return this.props.children as any;
-  }
-}
-
-/* ===== Small helpers ===== */
-function Splash({ children }: { children?: React.ReactNode }) {
-  return (
-    <section className="card splash">
-      <div className="splash-inner">
-        <div className="splash-title">Wooligotchi</div>
-        <div className="muted">A tiny on-chain Tamagotchi</div>
-        {children}
-      </div>
-    </section>
-  );
-}
-
-function DebugHUD({
-  gate,
-  lives,
-  isConnected,
-  address,
-  chainId,
-}: {
-  gate: "splash" | "locked" | "game";
-  lives: number;
-  isConnected: boolean;
-  address?: `0x${string}` | null;
-  chainId?: number;
-}) {
-  return (
-    <div
-      style={{
-        position: "fixed",
-        left: 12,
-        bottom: 12,
-        padding: "6px 10px",
-        background: "rgba(0,0,0,0.45)",
-        border: "1px solid rgba(255,255,255,0.2)",
-        borderRadius: 8,
-        fontSize: 12,
-        zIndex: 9999,
-      }}
-    >
-      <div>
-        gate: <b>{gate}</b>
-      </div>
-      <div>
-        lives: <b>{lives}</b> | connected: <b>{String(isConnected)}</b>
-      </div>
-      <div>addr: {address ?? "—"}</div>
-      <div>chainId: {chainId ?? "—"}</div>
-    </div>
-  );
 }
 
 /* ===== MAIN APP ===== */
@@ -262,35 +138,31 @@ function AppInner() {
   const { switchChain } = useSwitchChain();
   const { data: balance } = useBalance({ address, chainId, query: { enabled: !!address } });
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [vaultModal, setVaultModal] = useState(false);
 
-  // Lives from local storage
   const lives = useLivesGate(chainId, address);
 
-  // Keep game mounted and force form=egg on new game
+  // держим игру смонтированной после смерти, чтобы показать оверлей
   const [forceGame, setForceGame] = useState(false);
   useEffect(() => {
     const onDead = () => setForceGame(true);
-    const onNew = () => {
-      setForceGame(false);
-      setForm("egg");   // гарантированно после рестарта начинаем с яйца
-      saveForm("egg");  // фиксируем в localStorage, чтобы не проскочила стадия
-    };
-    window.addEventListener("wg:pet-dead", onDead as any);
-    window.addEventListener("wg:new-game", onNew as any);
-    return () => {
-      window.removeEventListener("wg:pet-dead", onDead as any);
-      window.removeEventListener("wg:new-game", onNew as any);
-    };
-  }, []);
-
-  // After on-chain confirmation of NFT transfer — grant exactly 1 life
-  useEffect(() => {
+    const onNew = () => setForceGame(false);
+    const onRequestNft = () => setVaultModal(true);
     const onConfirmed = (e: any) => {
       const from = (e?.detail?.address as `0x${string}` | undefined) || address;
       grantLives(chainId, from, 1);
+      setVaultModal(false);
     };
+    window.addEventListener("wg:pet-dead", onDead as any);
+    window.addEventListener("wg:new-game", onNew as any);
+    window.addEventListener("wg:request-nft", onRequestNft as any);
     window.addEventListener("wg:nft-confirmed", onConfirmed as any);
-    return () => window.removeEventListener("wg:nft-confirmed", onConfirmed as any);
+    return () => {
+      window.removeEventListener("wg:pet-dead", onDead as any);
+      window.removeEventListener("wg:new-game", onNew as any);
+      window.removeEventListener("wg:request-nft", onRequestNft as any);
+      window.removeEventListener("wg:nft-confirmed", onConfirmed as any);
+    };
   }, [chainId, address]);
 
   // Form state
@@ -335,7 +207,7 @@ function AppInner() {
   };
 
   const evolve = React.useCallback((next?: FormKey) => {
-    const n = next ?? nextFormRandom(form);
+    const n = next ?? form;
     setForm(n);
     return n;
   }, [form]);
@@ -376,40 +248,45 @@ function AppInner() {
 
       {/* Gates */}
       {gate === "splash" && (
-        <Splash>
-          <div style={{ display: "flex", justifyContent: "center", gap: 12, marginTop: 10 }}>
-            <button className="btn btn-primary btn-lg" onClick={() => setPickerOpen(true)}>
-              Connect wallet
-            </button>
+        <section className="card splash">
+          <div className="splash-inner">
+            <div className="splash-title">Wooligotchi</div>
+            <div className="muted">A tiny on-chain Tamagotchi</div>
+            <div style={{ display: "flex", justifyContent: "center", gap: 12, marginTop: 10 }}>
+              <button className="btn btn-primary btn-lg" onClick={() => setPickerOpen(true)}>
+                Connect wallet
+              </button>
+            </div>
           </div>
-        </Splash>
+        </section>
       )}
 
       {gate === "locked" && (
-        <Splash>
-          <div className="muted">Send 1 NFT → get 1 life</div>
-          <VaultPanel mode="cta" showFullAddresses />
-        </Splash>
+        <section className="card splash">
+          <div className="splash-inner">
+            <div className="splash-title">Wooligotchi</div>
+            <div className="muted">Send 1 NFT → get 1 life</div>
+            <VaultPanel mode="cta" />
+          </div>
+        </section>
       )}
 
       {gate === "game" && (
-        <ErrorBoundary>
-          <div style={{ maxWidth: 980, margin: "0 auto" }}>
-            <div className="muted" style={{ margin: "8px 0" }}>
-              Game mounted · form: {form}
-            </div>
-            <GameProvider config={petConfig}>
-              <Tamagotchi
-                key={address || "no-wallet"}
-                currentForm={form}
-                onEvolve={evolve}
-                lives={lives}
-                onLoseLife={() => spendOneLife(chainId, address)}
-                walletAddress={address || undefined}
-              />
-            </GameProvider>
+        <div style={{ maxWidth: 980, margin: "0 auto" }}>
+          <div className="muted" style={{ margin: "8px 0" }}>
+            Game mounted · form: {form}
           </div>
-        </ErrorBoundary>
+          <GameProvider config={petConfig}>
+            <Tamagotchi
+              key={address || "no-wallet"}
+              currentForm={form}
+              onEvolve={evolve}
+              lives={lives}
+              onLoseLife={() => spendOneLife(chainId, address)}
+              walletAddress={address || undefined}
+            />
+          </GameProvider>
+        </div>
       )}
 
       <footer className="foot">
@@ -417,43 +294,72 @@ function AppInner() {
       </footer>
 
       {/* Wallet picker */}
-      <div>
-        {pickerOpen && !isConnected && (
-          <div onClick={() => setPickerOpen(false)} className="modal">
-            <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: 460, maxWidth: "92vw" }}>
-              <div className="title" style={{ fontSize: 20, marginBottom: 10, color: "white" }}>
-                Connect a wallet
-              </div>
-              <div className="wallet-grid">
-                {walletItems.map((i) => (
-                  <button
-                    key={i.id}
-                    onClick={() => pickWallet(i.id)}
-                    disabled={connectStatus === "pending"}
-                    className="btn btn-ghost"
-                    style={{ width: "100%" }}
-                  >
-                    {i.label}
-                  </button>
-                ))}
-              </div>
-              <div className="helper" style={{ marginTop: 10 }}>
-                WalletConnect opens a QR for mobile wallets (Phantom, Rainbow, OKX, etc.).
-              </div>
-              <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
-                <button onClick={() => setPickerOpen(false)} className="btn">
-                  Close
+      {pickerOpen && !isConnected && (
+        <div onClick={() => setPickerOpen(false)} className="modal">
+          <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: 460, maxWidth: "92vw" }}>
+            <div className="title" style={{ fontSize: 20, marginBottom: 10, color: "white" }}>
+              Connect a wallet
+            </div>
+            <div className="wallet-grid">
+              {connectors.map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => pickWallet(c.id)}
+                  disabled={connectStatus === "pending"}
+                  className="btn btn-ghost"
+                  style={{ width: "100%" }}
+                >
+                  {c.name === "Injected" ? "Browser wallet (MetaMask / Phantom / OKX …)" : c.name}
                 </button>
-              </div>
+              ))}
+            </div>
+            <div className="helper" style={{ marginTop: 10 }}>
+              WalletConnect opens a QR for mobile wallets (Phantom, Rainbow, OKX, etc.).
+            </div>
+            <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
+              <button onClick={() => setPickerOpen(false)} className="btn">
+                Close
+              </button>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
-      {/* Debug HUD */}
-      <DebugHUD gate={gate} lives={lives} isConnected={isConnected} address={address} chainId={chainId} />
+      {/* Vault CTA modal (открывается по wg:request-nft из оверлея смерти) */}
+      {vaultModal && (
+        <div className="modal" onClick={() => setVaultModal(false)}>
+          <div className="card" style={{ width: 520, maxWidth: "92vw" }} onClick={(e)=>e.stopPropagation()}>
+            <div className="title" style={{ fontSize: 18, marginBottom: 8 }}>1 NFT → +1 life</div>
+            <VaultPanel mode="cta" />
+            <div style={{ marginTop: 10, display: "flex", justifyContent: "flex-end" }}>
+              <button className="btn" onClick={()=>setVaultModal(false)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+/* ===== lives hook ===== */
+function useLivesGate(chainId: number | undefined, address?: `0x${string}` | null) {
+  const [lives, setLives] = React.useState(0);
+  React.useEffect(() => {
+    const cid = chainId ?? MONAD_CHAIN_ID;
+    const read = () => setLives(getLivesLocal(cid, address));
+    read();
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === LIVES_KEY) read();
+    };
+    const onCustom = () => read();
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("wg:lives-changed", onCustom as any);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("wg:lives-changed", onCustom as any);
+    };
+  }, [chainId, address]);
+  return lives;
 }
 
 export default function App() {
