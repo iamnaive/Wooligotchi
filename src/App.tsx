@@ -279,15 +279,16 @@ function AppInner() {
     };
   }, []);
 
-  // When Tamagotchi says "NFT sent" — grant life
-  useEffect(() => {
-    const handler = (e: any) => {
-      const fromDetail = e?.detail?.address as `0x${string}` | undefined;
-      grantLives(chainId, fromDetail || address, 1);
-    };
-    window.addEventListener("wg:nft-sent", handler as any);
-    return () => window.removeEventListener("wg:nft-sent", handler as any);
-  }, [chainId, address]);
+ // After on-chain confirmation of NFT transfer — grant exactly 1 life
+useEffect(() => {
+  const onConfirmed = (e: any) => {
+    const from = (e?.detail?.address as `0x${string}` | undefined) || address;
+    grantLives(chainId, from, 1);
+  };
+  window.addEventListener("wg:nft-confirmed", onConfirmed as any);
+  return () => window.removeEventListener("wg:nft-confirmed", onConfirmed as any);
+}, [chainId, address]);
+
 
   // Form state (kept as-is)
   const [form, setForm] = useState<FormKey>(() => loadForm());
