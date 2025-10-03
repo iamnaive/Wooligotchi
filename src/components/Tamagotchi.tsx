@@ -947,23 +947,31 @@ if (!deadRef.current && sleepingNow) {
         <Bar label="Happiness" value={stats.happiness} h={BAR_H} />
       </div>
 
-      {/* Actions */}
-      <div
-        style={{
-          marginTop: 10, display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center",
-          opacity: isDead ? 0.5 : 1, pointerEvents: isDead ? ("none" as const) : ("auto" as const),
-        }}
-      >
-        <button className="btn" onClick={act.feedBurger} disabled={burgerLeft>0}>🍔 Burger{burgerLeft>0?` (${Math.ceil(burgerLeft/1000)}s)`:``}</button>
-        <button className="btn" onClick={act.feedCake} disabled={cakeLeft>0}>🍰 Cake{cakeLeft>0?` (${Math.ceil(cakeLeft/1000)}s)`:``}</button>
-        <button className="btn" onClick={act.play}>🎮 Play</button>
-        <button className="btn" onClick={act.heal} disabled={healLeft>0}>💊 Heal{healLeft>0?` (${Math.ceil(healLeft/1000)}s)`:``}</button>
-        <button className="btn" onClick={act.clean}>🧻 Clean</button>
-        <button className="btn btn-primary" onClick={() => setForm(forceEvolve(form))}>⭐ Evolve (debug)</button>
-        <span className="muted" style={{ alignSelf: "center" }}>
-          Poop: {poops.length} | Form: {prettyName(form)} {isSick ? " | 🤒 Sick" : ""} {catastrophe && Date.now() < catastrophe.until ? " | ⚠ Event" : ""} | Age: {(ageMs/1000|0)}s
-        </span>
-      </div>
+{/* Actions */}
+<div
+  style={{
+    marginTop: 10, display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center",
+    opacity: isDead ? 0.5 : 1, pointerEvents: isDead ? ("none" as const) : ("auto" as const),
+  }}
+>
+  {/* ⬇️ вот эта новая кнопка */}
+  <button
+    className="btn"
+    disabled
+    title="Coming soon"
+    style={{ opacity: 0.45, cursor: "not-allowed" }}
+  >
+    🧶 $WOOL
+  </button>
+
+  <button className="btn" onClick={act.feedBurger} disabled={burgerLeft>0}>🍔 Burger{burgerLeft>0?` (${Math.ceil(burgerLeft/1000)}s)`:``}</button>
+  <button className="btn" onClick={act.feedCake} disabled={cakeLeft>0}>🍰 Cake{cakeLeft>0?` (${Math.ceil(cakeLeft/1000)}s)`:``}</button>
+  <button className="btn" onClick={act.play}>🎮 Play</button>
+  <button className="btn" onClick={act.heal} disabled={healLeft>0}>💊 Heal{healLeft>0?` (${Math.ceil(healLeft/1000)}s)`:``}</button>
+  <button className="btn" onClick={act.clean}>🧻 Clean</button>
+  <button className="btn btn-primary" onClick={() => setForm(forceEvolve(form))}>⭐ Evolve (debug)</button>
+  {/* ...остальное без изменений */}
+</div>
 
       {/* Sleep controls */}
       <div
@@ -1043,13 +1051,42 @@ async function loadImageSafe(src: string): Promise<{ src: string; img: HTMLImage
   });
 }
 function drawBanner(ctx: CanvasRenderingContext2D, width: number, text: string) {
-  const pad = 4; ctx.save(); ctx.font = "12px monospace";
-  const w = Math.ceil(ctx.measureText(text).width) + pad * 2;
-  const x = Math.round((width - w) / 2), y = 18;
-  ctx.fillStyle = "rgba(0,0,0,0.55)"; ctx.fillRect(x, 6, w, 18);
-  ctx.fillStyle = "white"; ctx.fillText(text, x + pad, y);
+  ctx.save();
+
+  // Стиль текста баннера
+  ctx.font = "14px monospace";
+  ctx.textBaseline = "middle";
+
+  // Паддинги
+  const padX = 8;
+  const padY = 4;
+
+  // Замеряем размеры текста
+  const m = ctx.measureText(text);
+  const textW = Math.ceil(m.width);
+  const textH = Math.ceil(
+    (m.actualBoundingBoxAscent ?? 10) + (m.actualBoundingBoxDescent ?? 4)
+  );
+
+  // Размеры и позиция подложки
+  const bw = textW + padX * 2;
+  const bh = textH + padY * 2;
+
+  // Центрируем по ширине, фиксируем отступ сверху в мире
+  const x = Math.round((width - bw) / 2);
+  const y = 10; // можно подвинуть, если нужно ниже/выше
+
+  // Подложка
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  ctx.fillRect(x, y, bw, bh);
+
+  // Текст по центру подложки по вертикали
+  ctx.fillStyle = "#fff";
+  ctx.fillText(text, x + padX, y + bh / 2);
+
   ctx.restore();
 }
+
 function safeReadJSON<T>(key: string): T | null {
   try { const raw = localStorage.getItem(key); if (!raw) return null; return JSON.parse(raw) as T; } catch { return null; }
 }
