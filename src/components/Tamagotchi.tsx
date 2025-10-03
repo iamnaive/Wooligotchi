@@ -969,8 +969,7 @@ if (!deadRef.current && sleepingNow) {
   <button className="btn" onClick={act.play}>🎮 Play</button>
   <button className="btn" onClick={act.heal} disabled={healLeft>0}>💊 Heal{healLeft>0?` (${Math.ceil(healLeft/1000)}s)`:``}</button>
   <button className="btn" onClick={act.clean}>🧻 Clean</button>
-  <button className="btn btn-primary" onClick={() => setForm(forceEvolve(form))}>⭐ Evolve (debug)</button>
-  {/* ...остальное без изменений */}
+    {/* ...остальное без изменений */}
 </div>
 
       {/* Sleep controls */}
@@ -1024,14 +1023,6 @@ function prettyName(f: FormKey) {
     const base = String(f).replace("_child", "");
     const cap = base === "we" ? "WE" : (base.charAt(0).toUpperCase() + base.slice(1));
     return `${cap} (child)`;
-  }
-  return f;
-}
-function forceEvolve(f: FormKey): FormKey {
-  if (f === "egg") return pickOne(["chog_child","molandak_child","moyaki_child","we_child"] as const) as FormKey;
-  if (String(f).endsWith("_child")) {
-    const map: Record<string, FormKey> = { chog_child:"Chog", molandak_child:"Molandak", moyaki_child:"Moyaki", we_child:"WE" };
-    return (map[String(f)] || f) as FormKey;
   }
   return f;
 }
