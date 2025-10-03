@@ -5,12 +5,12 @@ import { zeroAddress } from "viem";
 import { useAccount, useConfig, useSwitchChain } from "wagmi";
 import { readContract, writeContract, getPublicClient } from "@wagmi/core";
 
-/** VaultPanel (speed-optimized)
- *  - Uses multicall for batch owner/balance checks (much faster).
- *  - Has "fast" mode by default, and "balanced" if you want deeper scan.
- *  - Supports manual send by ID for both ERC-721 and ERC-1155 (instant, no scan).
- *  - Surfaces tx hash + explorer link; robust receipt waiting with timeout.
- *  - Emits "wg:nft-confirmed" on success, preserving your existing flow.
+/** VaultPanel (multicall-safe)
+ *  - Tries multicall for fast probing; if chain doesn't support it, falls back to parallel single calls.
+ *  - Supports ERC-721 (incl. non-enumerable) and ERC-1155.
+ *  - Manual send by ID for both standards (instant path).
+ *  - Emits "wg:nft-confirmed" on success (Tamagotchi listens to it).
+ *  - Public API unchanged: export default function VaultPanel({ mode = "full" | "cta" })
  */
 
 export default function VaultPanel({ mode = "full" }: { mode?: "full" | "cta" }) {
@@ -23,17 +23,14 @@ const ALLOWED_CONTRACT = "0x88c78d5852f45935324c6d100052958f694e8446";
 const VAULT = (import.meta.env.VITE_VAULT_ADDRESS as string) || zeroAddress;
 const EXPLORER = (import.meta.env.VITE_EXPLORER_URL as string) || "";
 
-/* ---- Probe tuning ----
- * Fast mode: quickest, fewer probes.
- * Balanced mode: deeper, still capped to avoid long scans.
- */
+/* ---- Probe tuning ---- */
 const SMALL_FIRST_RANGE = 64;
-const MAX_ERC721_PROBES_FAST = 500;     // ~1–2 multicalls
-const MAX_ERC721_PROBES_BAL = 1800;     // deeper search
+const MAX_ERC721_PROBES_FAST = 500;
+const MAX_ERC721_PROBES_BAL = 1800;
 const MAX_ERC1155_PROBES_FAST = 256;
 const MAX_ERC1155_PROBES_BAL = 800;
-const DEFAULT_TOP_GUESS  = 10_000;      // you have 10k ids
-const BATCH_SIZE         = 32;          // multicall batch size
+const DEFAULT_TOP_GUESS  = 10_000;  // you said 10k ids exist
+const BATCH_SIZE         = 24;      // batch size for parallelism
 const YIELD_EVERY        = 6;
 
 /* ===== ABIs ===== */
@@ -98,7 +95,7 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
   const [busy, setBusy] = useState(false);
   const [tx, setTx] = useState<`0x${string}` | null>(null);
   const [lives, setLives] = useState(() => getLives(MONAD_CHAIN_ID, address));
-  const [modeScan, setModeScan] = useState<"fast"|"balanced">("fast"); // default to fast
+  const [modeScan, setModeScan] = useState<"fast"|"balanced">("fast"); // default fast
 
   // Manual send inputs
   const [manualId721, setManualId721] = useState<string>("");
@@ -114,7 +111,7 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     return () => window.removeEventListener("wg:lives-changed", onLives as any);
   }, [address]);
 
-  // Detect token standard (in parallel)
+  // Detect token standard
   useEffect(() => {
     (async () => {
       try {
@@ -175,42 +172,88 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     } catch { return 0n; }
   }
 
-  /* ===== multicall probes ===== */
+  /* ===== probe helpers (multicall with fallback) ===== */
 
-  async function probe721Multicall(user: `0x${string}`, ids: number[]): Promise<bigint | null> {
-    const contracts = ids.map((id) => ({
-      address: ALLOWED_CONTRACT as `0x${string}`,
-      abi: ERC721_READ_ABI,
-      functionName: "ownerOf" as const,
-      args: [BigInt(id)],
-    }));
-    const res = await pc.multicall({ contracts, allowFailure: true });
-    for (let i = 0; i < res.length; i++) {
-      const r = res[i];
-      if (r.status === "success") {
-        const owner = (r.result as `0x${string}`).toLowerCase();
-        if (owner === user.toLowerCase()) return BigInt(ids[i]);
+  async function probe721Batch(user: `0x${string}`, ids: number[]): Promise<bigint | null> {
+    // Try multicall
+    try {
+      const res = await pc.multicall({
+        allowFailure: true,
+        contracts: ids.map((id) => ({
+          address: ALLOWED_CONTRACT as `0x${string}`,
+          abi: ERC721_READ_ABI,
+          functionName: "ownerOf" as const,
+          args: [BigInt(id)],
+        })),
+      });
+      for (let i = 0; i < res.length; i++) {
+        const r = res[i];
+        if (r.status === "success") {
+          const owner = (r.result as `0x${string}`).toLowerCase();
+          if (owner === user.toLowerCase()) return BigInt(ids[i]);
+        }
       }
+      return null;
+    } catch {
+      // Fallback: parallel single calls
+      const calls = ids.map((id) =>
+        readContract(cfg, {
+          abi: ERC721_READ_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
+          functionName: "ownerOf", args: [BigInt(id)], chainId: MONAD_CHAIN_ID,
+        })
+        .then((owner) => ({ ok: true, id, owner: (owner as `0x${string}`).toLowerCase() }))
+        .catch(() => ({ ok: false, id }))
+      );
+      const res = await Promise.allSettled(calls);
+      for (const rr of res) {
+        if (rr.status === "fulfilled" && (rr.value as any).ok) {
+          const v = rr.value as any;
+          if (v.owner === user.toLowerCase()) return BigInt(v.id);
+        }
+      }
+      return null;
     }
-    return null;
   }
 
-  async function probe1155Multicall(user: `0x${string}`, ids: number[]): Promise<bigint | null> {
-    const contracts = ids.map((id) => ({
-      address: ALLOWED_CONTRACT as `0x${string}`,
-      abi: ERC1155_ABI,
-      functionName: "balanceOf" as const,
-      args: [user, BigInt(id)],
-    }));
-    const res = await pc.multicall({ contracts, allowFailure: true });
-    for (let i = 0; i < res.length; i++) {
-      const r = res[i];
-      if (r.status === "success") {
-        const bal = r.result as bigint;
-        if (bal > 0n) return BigInt(ids[i]);
+  async function probe1155Batch(user: `0x${string}`, ids: number[]): Promise<bigint | null> {
+    // Try multicall
+    try {
+      const res = await pc.multicall({
+        allowFailure: true,
+        contracts: ids.map((id) => ({
+          address: ALLOWED_CONTRACT as `0x${string}`,
+          abi: ERC1155_ABI,
+          functionName: "balanceOf" as const,
+          args: [user, BigInt(id)],
+        })),
+      });
+      for (let i = 0; i < res.length; i++) {
+        const r = res[i];
+        if (r.status === "success") {
+          const bal = r.result as bigint;
+          if (bal > 0n) return BigInt(ids[i]);
+        }
       }
+      return null;
+    } catch {
+      // Fallback: parallel single calls
+      const calls = ids.map((id) =>
+        readContract(cfg, {
+          abi: ERC1155_ABI, address: ALLOWED_CONTRACT as `0x${string}`,
+          functionName: "balanceOf", args: [user, BigInt(id)], chainId: MONAD_CHAIN_ID,
+        })
+        .then((bal) => ({ ok: true, id, bal: bal as bigint }))
+        .catch(() => ({ ok: false, id }))
+      );
+      const res = await Promise.allSettled(calls);
+      for (const rr of res) {
+        if (rr.status === "fulfilled" && (rr.value as any).ok) {
+          const v = rr.value as any;
+          if (v.bal > 0n) return BigInt(v.id);
+        }
+      }
+      return null;
     }
-    return null;
   }
 
   /* ===== pickers ===== */
@@ -229,7 +272,6 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
       } catch {}
     }
 
-    // Budget per mode
     const cap = modeScan === "fast" ? MAX_ERC721_PROBES_FAST : MAX_ERC721_PROBES_BAL;
     let spent = 0;
 
@@ -238,7 +280,7 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
       const ids = range(0, SMALL_FIRST_RANGE);
       const batches = chunk(ids, BATCH_SIZE);
       for (const b of batches) {
-        const hit = await probe721Multicall(user, b);
+        const hit = await probe721Batch(user, b);
         spent += b.length;
         if (hit !== null) return hit;
         if (spent >= cap) return null;
@@ -246,16 +288,15 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
       }
     }
 
-    // 3) Top-down near totalSupply (or default top)
-    const topGuess = DEFAULT_TOP_GUESS; // cheap: no extra read
+    // 3) Top-down near default top (10k)
     {
       const remain = cap - spent;
       const down = Math.max(0, Math.floor(remain * 0.6));
       if (down > 0) {
-        const ids = range(topGuess - 1, Math.max(0, topGuess - down), -1);
+        const ids = range(DEFAULT_TOP_GUESS - 1, Math.max(0, DEFAULT_TOP_GUESS - down), -1);
         const batches = chunk(ids, BATCH_SIZE);
         for (const b of batches) {
-          const hit = await probe721Multicall(user, b);
+          const hit = await probe721Batch(user, b);
           spent += b.length;
           if (hit !== null) return hit;
           if (spent >= cap) return null;
@@ -264,16 +305,16 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
       }
     }
 
-    // 4) Sparse stride across 0..topGuess
+    // 4) Sparse stride across 0..DEFAULT_TOP_GUESS
     {
       const remain = cap - spent;
       if (remain <= 0) return null;
-      const stride = Math.max(1, Math.ceil(topGuess / remain));
+      const stride = Math.max(1, Math.ceil(DEFAULT_TOP_GUESS / remain));
       const picks: number[] = [];
-      for (let i = 0; i <= topGuess && picks.length < remain; i += stride) picks.push(i);
+      for (let i = 0; i <= DEFAULT_TOP_GUESS && picks.length < remain; i += stride) picks.push(i);
       const batches = chunk(picks, BATCH_SIZE);
       for (const b of batches) {
-        const hit = await probe721Multicall(user, b);
+        const hit = await probe721Batch(user, b);
         spent += b.length;
         if (hit !== null) return hit;
         if (spent >= cap) return null;
@@ -293,7 +334,7 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
       const ids = range(0, SMALL_FIRST_RANGE);
       const batches = chunk(ids, BATCH_SIZE);
       for (const b of batches) {
-        const hit = await probe1155Multicall(user, b);
+        const hit = await probe1155Batch(user, b);
         spent += b.length;
         if (hit !== null) return hit;
         if (spent >= cap) return null;
@@ -307,7 +348,7 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
       for (let v = 128; v <= 65536 && spent < cap; v *= 2) hints.push(v);
       const batches = chunk(hints, BATCH_SIZE);
       for (const b of batches) {
-        const hit = await probe1155Multicall(user, b);
+        const hit = await probe1155Batch(user, b);
         spent += b.length;
         if (hit !== null) return hit;
         if (spent >= cap) return null;
@@ -318,15 +359,14 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     return null;
   }
 
-  /* ===== send helpers (with visible tx + timeout) ===== */
+  /* ===== send + wait receipt ===== */
 
   async function waitReceipt(hash: `0x${string}`) {
-    // wait with timeout; if times out, show "still pending…" but do not error hard
     try {
       const rcpt = await pc.waitForTransactionReceipt({ hash, confirmations: 1, timeout: 120_000 });
       return rcpt;
-    } catch (e) {
-      append("⏳ Still pending… You can keep this panel open; it will confirm soon.");
+    } catch {
+      append("⏳ Still pending… keep this panel open; it should confirm soon.");
       return null;
     }
   }
@@ -383,8 +423,6 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     }
   }
 
-  /* ===== main auto flow ===== */
-
   async function sendOne() {
     if (!isConnected || VAULT === zeroAddress || !address) return;
     setBusy(true); setLog(""); setTx(null);
@@ -392,7 +430,6 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
     try {
       try { await switchChain({ chainId: MONAD_CHAIN_ID }); } catch {}
 
-      // Try ERC-721 first (or unknown)
       if (std === "ERC721" || std === "UNKNOWN") {
         const id = await pickAnyErc721(address as `0x${string}`);
         if (id !== null) {
@@ -414,7 +451,6 @@ function VaultPanelInner({ mode }: { mode: "full" | "cta" }) {
         }
       }
 
-      // Try ERC-1155
       const id1155 = await pickAnyErc1155(address as `0x${string}`);
       if (id1155 !== null) {
         const hash = await writeContract(cfg, {
