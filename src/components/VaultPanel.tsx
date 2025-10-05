@@ -8,27 +8,18 @@ import {
 import { isAddress, parseAbiItem } from "viem";
 import { emit } from "../utils/domEvents";
 
-/**
- * ENV (не обязательно, но удобно для дефолтов):
- *  - VITE_VAULT_ADDRESS: адрес ваулта (обязателен, если используем ваулт)
- *  - VITE_COLLECTION_ADDRESS: адрес коллекции ERC-721 (опционален — можно ввести в UI)
- *  - VITE_VAULT_FN: имя метода ваулта, по умолчанию "deposit".
- *                   Если пусто/"" — используем прямой safeTransferFrom без ваулта.
- *  - VITE_EXPLORER_TX: base URL обозревателя (например, "https://explorer.monad.xyz/tx/")
- */
-
 const ENV_VAULT_ADDRESS = (import.meta.env.VITE_VAULT_ADDRESS || "").trim();
 const ENV_COLLECTION_ADDRESS = (import.meta.env.VITE_COLLECTION_ADDRESS || "").trim();
 const VAULT_FN = (import.meta.env.VITE_VAULT_FN || "deposit").trim(); // "" => режим direct transfer
 const EXPLORER_TX = (import.meta.env.VITE_EXPLORER_TX || "").trim();
 
-// Минимальный ERC-721 ABI
+
 const ERC721_ABI = [
   parseAbiItem("function approve(address to, uint256 tokenId)"),
   parseAbiItem("function safeTransferFrom(address from, address to, uint256 tokenId)"),
 ];
 
-// Ваулт по умолчанию: deposit(address collection, uint256 tokenId)
+
 const VAULT_ABI = [
   parseAbiItem("function deposit(address collection, uint256 tokenId)"),
 ];
@@ -51,7 +42,7 @@ export default function VaultPanel() {
     isAddress(ENV_COLLECTION_ADDRESS as `0x${string}`) ? ENV_COLLECTION_ADDRESS : ""
   );
   const [vaultAddr, setVaultAddr] = useState<string>(
-    (VAULT_FN ? ENV_VAULT_ADDRESS : ENV_VAULT_ADDRESS) // показываем, но редактирование ниже отключим/включим
+    (VAULT_FN ? ENV_VAULT_ADDRESS : ENV_VAULT_ADDRESS) 
   );
 
   const [rawId, setRawId] = useState("");
