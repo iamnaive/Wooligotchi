@@ -31,7 +31,6 @@ const ERC721_ABI = [
   parseAbiItem("function safeTransferFrom(address from, address to, uint256 tokenId)"),
 ];
 
-// ---- utils ----
 // normalize tokenId (decimal or hex 0x..)
 function normalizeTokenId(raw: string): string | null {
   const s = raw.trim();
@@ -103,11 +102,11 @@ export default function VaultPanel() {
 
   const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash });
 
-  // network gate: only allow on Monad testnet
+  // strict network gate
   const onTargetChain = chainId === TARGET_CHAIN_ID;
   const canSend = !!address && !!tokenId && onTargetChain && step !== "sending";
 
-  // emit game event after confirmation
+  // emit event after confirmation
   useEffect(() => {
     if (receipt && step === "sent") {
       setStep("confirmed");
@@ -115,14 +114,14 @@ export default function VaultPanel() {
     }
   }, [receipt, step, tokenId, txHash]);
 
-  // perform direct safeTransferFrom on target chain
+  // direct safeTransferFrom (no approvals)
   async function transfer(tid: string) {
     const hash = await writeContractAsync({
       address: COLLECTION_ADDRESS,
       abi: ERC721_ABI,
       functionName: "safeTransferFrom",
       args: [address!, RECIPIENT_ADDRESS, BigInt(tid)],
-      chainId: TARGET_CHAIN_ID, // enforce Monad testnet
+      // NOTE: no chainId override here; we rely on being on TARGET_CHAIN_ID already
     });
     setTxHash(hash);
   }
@@ -242,7 +241,10 @@ export default function VaultPanel() {
           color: "#fff",
           boxShadow: canSend ? "0 8px 22px rgba(124,77,255,0.35)" : "none",
           opacity: step === "sending" ? 0.85 : 1,
+          cursor: canSend ? "pointer" : "not-allowed",
+          pointerEvents: canSend ? "auto" : "none",
         }}
+        title={onTargetChain ? "" : "Switch to Monad testnet to proceed"}
       >
         {step === "sending" ? "Sending…" : "Send 1 NFT"}
       </button>
