@@ -1,114 +1,132 @@
-import React, { useMemo, useState } from "react";
+// src/components/VaultPanel.tsx
+import React, { useMemo, useState, useEffect } from "react";
 import {
   useAccount,
   useChainId,
   useWaitForTransactionReceipt,
   useWriteContract,
 } from "wagmi";
-import { isAddress, parseAbiItem } from "viem";
+import { parseAbiItem } from "viem";
 import { emit } from "../utils/domEvents";
 
-const ENV_VAULT_ADDRESS = (import.meta.env.VITE_VAULT_ADDRESS || "").trim();
-const ENV_COLLECTION_ADDRESS = (import.meta.env.VITE_COLLECTION_ADDRESS || "").trim();
-const VAULT_FN = (import.meta.env.VITE_VAULT_FN || "deposit").trim(); // "" => режим direct transfer
-const EXPLORER_TX = (import.meta.env.VITE_EXPLORER_TX || "").trim();
+// Hardcoded addresses (as requested)
+const COLLECTION_ADDRESS = "0x88c78d5852f45935324c6d100052958f694e8446" as const; // ERC-721
+const VAULT_ADDRESS      = "0xEb9650DDC18FF692f6224EA17f13C351A6108758" as const; // recipient
 
+// Explorer base (optional). Prefer VITE_EXPLORER_TX that ends with /tx/
+const EXPLORER_TX =
+  (import.meta.env.VITE_EXPLORER_TX as string | undefined)?.trim() ||
+  (
+    (import.meta.env.VITE_EXPLORER_URL as string | undefined)?.trim()
+      ? `${(import.meta.env.VITE_EXPLORER_URL as string).trim().replace(/\/+$/, "")}/tx/`
+      : ""
+  );
 
+// Minimal ERC-721 ABI
 const ERC721_ABI = [
   parseAbiItem("function approve(address to, uint256 tokenId)"),
   parseAbiItem("function safeTransferFrom(address from, address to, uint256 tokenId)"),
 ];
 
-
-const VAULT_ABI = [
-  parseAbiItem("function deposit(address collection, uint256 tokenId)"),
-];
-
 function normalizeTokenId(raw: string): string | null {
   const s = raw.trim();
   if (!s) return null;
-  if (/^0x[0-9a-fA-F]+$/.test(s)) return s;      // hex ok
-  if (/^\d+$/.test(s)) return s.replace(/^0+/, "") || "0"; // dec ok
+  if (/^0x[0-9a-fA-F]+$/.test(s)) return s;               // hex
+  if (/^\d+$/.test(s)) return s.replace(/^0+/, "") || "0"; // decimal
   return null;
 }
 
-export default function VaultPanel() {
-  const chainId = useChainId();
-  const { address } = useAccount();
-  const { writeContractAsync } = useWriteContract();
+function short(addr: string, left = 6, right = 4) {
+  return `${addr.slice(0, left)}…${addr.slice(-right)}`;
+}
 
-  // UI state
-  const [collectionAddr, setCollectionAddr] = useState<string>(
-    isAddress(ENV_COLLECTION_ADDRESS as `0x${string}`) ? ENV_COLLECTION_ADDRESS : ""
+const HashLink: React.FC<{ hash?: `0x${string}` | null; label?: string }> = ({ hash, label }) => {
+  if (!hash) return null;
+  const text = label || `${hash.slice(0, 10)}…${hash.slice(-8)}`;
+  const href = EXPLORER_TX ? `${EXPLORER_TX}${hash}` : undefined;
+  return href ? (
+    <a href={href} target="_blank" rel="noreferrer" className="text-[12px]" style={{ color: "#9ecbff" }}>
+      {text}
+    </a>
+  ) : (
+    <code style={{ fontSize: 12, opacity: 0.85 }}>{text}</code>
   );
-  const [vaultAddr, setVaultAddr] = useState<string>(
-    (VAULT_FN ? ENV_VAULT_ADDRESS : ENV_VAULT_ADDRESS) 
-  );
+};
+
+const InfoRow: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+  <div
+    style={{
+      display: "grid",
+      gridTemplateColumns: "120px 1fr",
+      gap: 8,
+      alignItems: "center",
+      marginTop: 8,
+      fontSize: 12,
+      opacity: 0.9,
+    }}
+  >
+    <div style={{ color: "rgba(255,255,255,0.7)" }}>{label}</div>
+    <div
+      style={{
+        background: "#17171c",
+        border: "1px solid #2b2b31",
+        borderRadius: 12,
+        padding: "6px 10px",
+        color: "#fff",
+        display: "flex",
+        alignItems: "center",
+        height: 32,
+      }}
+    >
+      {children}
+    </div>
+  </div>
+);
+
+export default function VaultPanel() {
+  const { address } = useAccount();
+  const chainId = useChainId();
+  const { writeContractAsync } = useWriteContract();
 
   const [rawId, setRawId] = useState("");
   const tokenId = useMemo(() => normalizeTokenId(rawId), [rawId]);
 
-  const [step, setStep] = useState<
-    "idle" | "approving" | "approved" | "sending" | "sent" | "confirmed" | "error"
-  >("idle");
+  const [step, setStep] = useState<"idle" | "approving" | "approved" | "sending" | "sent" | "confirmed" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
   const [approveHash, setApproveHash] = useState<`0x${string}` | null>(null);
-  const [actionHash, setActionHash] = useState<`0x${string}` | null>(null);
+  const [transferHash, setTransferHash] = useState<`0x${string}` | null>(null);
 
   const { data: approveReceipt } = useWaitForTransactionReceipt({ hash: approveHash });
-  const { data: actionReceipt } = useWaitForTransactionReceipt({ hash: actionHash });
+  const { data: transferReceipt } = useWaitForTransactionReceipt({ hash: transferHash });
 
-  // Валидность адресов
-  const collectionOK = isAddress(collectionAddr as `0x${string}`);
-  const vaultOK = VAULT_FN
-    ? isAddress(vaultAddr as `0x${string}`) // ваулт обязателен в режиме deposit
-    : isAddress(vaultAddr as `0x${string}`) || true; // в direct-режиме vaultAddr тоже нужен как получатель; можно оставить из ENV или ввести
+  const canSend = !!address && !!tokenId && step !== "approving" && step !== "sending";
 
-  const canSend =
-    !!address &&
-    !!tokenId &&
-    collectionOK &&
-    vaultOK &&
-    step !== "approving" &&
-    step !== "sending";
-
-  // по финальному receipt — эмитим событие для App/Tamagotchi
-  React.useEffect(() => {
-    if (actionReceipt && step === "sent") {
+  // Emit confirmation for App/Tamagotchi once transfer is confirmed
+  useEffect(() => {
+    if (transferReceipt && step === "sent") {
       setStep("confirmed");
-      emit("wg:nft-confirmed", { tokenId, txHash: actionHash, chainId, collection: collectionAddr });
+      emit("wg:nft-confirmed", { tokenId, txHash: transferHash, chainId, collection: COLLECTION_ADDRESS });
     }
-  }, [actionReceipt, step, tokenId, actionHash, chainId, collectionAddr]);
+  }, [transferReceipt, step, tokenId, transferHash, chainId]);
 
-  async function approveIfNeeded(tid: string) {
+  async function approve(tid: string) {
     const hash = await writeContractAsync({
-      address: collectionAddr as `0x${string}`,
+      address: COLLECTION_ADDRESS,
       abi: ERC721_ABI,
       functionName: "approve",
-      args: [vaultAddr as `0x${string}`, BigInt(tid)],
+      args: [VAULT_ADDRESS, BigInt(tid)],
     });
     setApproveHash(hash);
   }
 
-  async function doVaultDeposit(tid: string) {
+  async function transfer(tid: string) {
     const hash = await writeContractAsync({
-      address: vaultAddr as `0x${string}`,
-      abi: VAULT_ABI,
-      functionName: (VAULT_FN || "deposit") as "deposit",
-      args: [collectionAddr as `0x${string}`, BigInt(tid)],
-    });
-    setActionHash(hash);
-  }
-
-  async function doDirectTransfer(tid: string) {
-    // Прямой перевод NFT на адрес ваулта/получателя
-    const hash = await writeContractAsync({
-      address: collectionAddr as `0x${string}`,
+      address: COLLECTION_ADDRESS,
       abi: ERC721_ABI,
       functionName: "safeTransferFrom",
-      args: [address as `0x${string}`, (vaultAddr || ENV_VAULT_ADDRESS) as `0x${string}`, BigInt(tid)],
+      args: [address!, VAULT_ADDRESS, BigInt(tid)],
     });
-    setActionHash(hash);
+    setTransferHash(hash);
   }
 
   const onSend = async () => {
@@ -117,130 +135,63 @@ export default function VaultPanel() {
 
     try {
       setStep("approving");
-      await approveIfNeeded(tokenId);
+      await approve(tokenId);
     } catch (e: any) {
       setStep("error");
       setError(e?.shortMessage || e?.message || "Approve failed");
       return;
     }
 
-    // Дождёмся хотя бы несколько секунд (хуки тоже подтянут receipt)
+    // Give hooks time to catch the approve receipt for smoother UX
     try {
       let guard = 0;
-      while (!approveReceipt && guard++ < 200) {
-        // ~ до 20s
+      while (!approveReceipt && guard++ < 150) {
         // eslint-disable-next-line no-await-in-loop
-        await new Promise((r) => setTimeout(r, 100));
+        await new Promise((r) => setTimeout(r, 100)); // up to ~15s
       }
       setStep("approved");
     } catch {}
 
     try {
       setStep("sending");
-      if (VAULT_FN) {
-        await doVaultDeposit(tokenId);
-      } else {
-        await doDirectTransfer(tokenId);
-      }
+      await transfer(tokenId);
       setStep("sent");
     } catch (e: any) {
       setStep("error");
-      setError(e?.shortMessage || e?.message || "Transaction failed");
+      setError(e?.shortMessage || e?.message || "Transfer failed");
       return;
     }
   };
 
-  const HashLink: React.FC<{ hash?: `0x${string}` | null; label?: string }> = ({ hash, label }) => {
-    if (!hash) return null;
-    const text = label || `${hash.slice(0, 10)}…${hash.slice(-8)}`;
-    const href = EXPLORER_TX ? `${EXPLORER_TX}${hash}` : undefined;
-    return href ? (
-      <a href={href} target="_blank" rel="noreferrer" className="text-[12px]" style={{ color: "#9ecbff" }}>
-        {text}
-      </a>
-    ) : (
-      <code style={{ fontSize: 12, opacity: 0.85 }}>{text}</code>
-    );
-  };
-
-  // ===== UI =====
   return (
     <div
       className="rounded-2xl p-5"
       style={{
-        background: "linear-gradient(180deg,#111216,#0c0d10)",
-        color: "#e9e9ee",
+        background: "linear-gradient(180deg,#0f1117,#0b0d12)",
+        color: "#eaeaf0",
         border: "1px solid rgba(255,255,255,0.08)",
         boxShadow: "0 18px 50px rgba(0,0,0,0.55)",
-        maxWidth: 560,
+        maxWidth: 520,
         margin: "0 auto",
       }}
     >
       <div style={{ textAlign: "center", marginBottom: 12 }}>
-        <div style={{ fontWeight: 700, fontSize: 18, letterSpacing: 0.2 }}>Vault</div>
-        <div className="muted" style={{ fontSize: 13, opacity: 0.85, marginTop: 4 }}>
-          Send 1 NFT to {VAULT_FN ? "vault (deposit)" : "recipient (direct transfer)"} and get <b>+1 life</b>.
+        <div style={{ fontWeight: 800, fontSize: 18, letterSpacing: 0.2 }}>Vault</div>
+        <div style={{ fontSize: 13, opacity: 0.85, marginTop: 4 }}>
+          Send 1 NFT from the allowed collection and get <b>+1 life</b>.
         </div>
       </div>
 
-      {/* COLLECTION ADDRESS */}
-      <div style={{ marginTop: 10 }}>
-        <label className="text-xs opacity-80" style={{ display: "block", marginBottom: 6 }}>
-          Collection address (ERC-721)
-        </label>
-        <div
-          className="flex items-center rounded-xl px-3 py-2"
-          style={{ background: "#17171c", border: "1px solid #2b2b31" }}
-        >
-          <input
-            className="flex-1 bg-transparent outline-none text-sm"
-            placeholder="0x… (ERC-721 contract)"
-            value={collectionAddr}
-            onChange={(e) => setCollectionAddr(e.target.value.trim())}
-            spellCheck={false}
-            style={{ color: "#fff" }}
-          />
-          <span className="text-[11px] ml-2" style={{ opacity: 0.75 }}>
-            {collectionOK ? "ok" : "invalid"}
-          </span>
-        </div>
-        {!collectionOK && (
-          <div style={{ color: "#ff6b6b", fontSize: 12, marginTop: 6 }}>
-            Please enter a valid ERC-721 contract address.
-          </div>
-        )}
-      </div>
+      {/* Read-only info */}
+      <InfoRow label="Collection">
+        <code style={{ opacity: 0.9 }}>{short(COLLECTION_ADDRESS)}</code>
+      </InfoRow>
+      <InfoRow label="Recipient">
+        <code style={{ opacity: 0.9 }}>{short(VAULT_ADDRESS)}</code>
+      </InfoRow>
 
-      {/* VAULT / RECIPIENT ADDRESS (редактируемо на всякий случай) */}
-      <div style={{ marginTop: 10 }}>
-        <label className="text-xs opacity-80" style={{ display: "block", marginBottom: 6 }}>
-          {VAULT_FN ? "Vault address" : "Recipient address"}
-        </label>
-        <div
-          className="flex items-center rounded-xl px-3 py-2"
-          style={{ background: "#17171c", border: "1px solid #2b2b31" }}
-        >
-          <input
-            className="flex-1 bg-transparent outline-none text-sm"
-            placeholder="0x…"
-            value={vaultAddr}
-            onChange={(e) => setVaultAddr(e.target.value.trim())}
-            spellCheck={false}
-            style={{ color: "#fff" }}
-          />
-          <span className="text-[11px] ml-2" style={{ opacity: 0.75 }}>
-            {vaultOK ? "ok" : "invalid"}
-          </span>
-        </div>
-        {!vaultOK && (
-          <div style={{ color: "#ff6b6b", fontSize: 12, marginTop: 6 }}>
-            Please enter a valid {VAULT_FN ? "vault" : "recipient"} address.
-          </div>
-        )}
-      </div>
-
-      {/* TOKEN ID */}
-      <div style={{ marginTop: 10 }}>
+      {/* Token ID input */}
+      <div style={{ marginTop: 12 }}>
         <label className="text-xs opacity-80" style={{ display: "block", marginBottom: 6 }}>
           tokenId
         </label>
@@ -278,13 +229,13 @@ export default function VaultPanel() {
           background: canSend ? "linear-gradient(90deg,#7c4dff,#00c8ff)" : "#2a2a2f",
           color: "#fff",
           boxShadow: canSend ? "0 8px 22px rgba(124,77,255,0.35)" : "none",
-          opacity: step === "approving" || step === "sending" ? 0.8 : 1,
+          opacity: step === "approving" || step === "sending" ? 0.85 : 1,
         }}
       >
         {step === "approving" ? "Approving…" : step === "sending" ? "Sending…" : "Send 1 NFT"}
       </button>
 
-      {/* STATUS */}
+      {/* Status */}
       <div className="mt-3 space-y-1 text-xs" style={{ marginTop: 10 }}>
         {approveHash && (
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -292,13 +243,13 @@ export default function VaultPanel() {
             <HashLink hash={approveHash} />
           </div>
         )}
-        {actionHash && (
+        {transferHash && (
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            <span style={{ opacity: 0.8 }}>{VAULT_FN ? "Deposit tx:" : "Transfer tx:"}</span>
-            <HashLink hash={actionHash} />
+            <span style={{ opacity: 0.8 }}>Transfer tx:</span>
+            <HashLink hash={transferHash} />
           </div>
         )}
-        {step === "sent" && !actionReceipt && (
+        {step === "sent" && !transferReceipt && (
           <div style={{ opacity: 0.85 }}>Waiting for confirmation…</div>
         )}
         {step === "confirmed" && (
@@ -307,25 +258,9 @@ export default function VaultPanel() {
         {error && <div style={{ color: "#ff6b6b" }}>{error}</div>}
       </div>
 
-      {/* Legend */}
       <div className="text-[11px] opacity-65" style={{ marginTop: 10 }}>
-        {VAULT_FN
-          ? "Flow: approve(collection → vault) → vault.deposit(collection, tokenId)"
-          : "Flow: approve(collection → recipient) → collection.safeTransferFrom(owner, recipient, tokenId)"}
+        Flow: approve(collection → recipient) → collection.safeTransferFrom(owner, recipient, tokenId)
       </div>
     </div>
   );
 }
-
-const HashLink: React.FC<{ hash?: `0x${string}` | null; label?: string }> = ({ hash, label }) => {
-  if (!hash) return null;
-  const text = label || `${hash.slice(0, 10)}…${hash.slice(-8)}`;
-  const href = EXPLORER_TX ? `${EXPLORER_TX}${hash}` : undefined;
-  return href ? (
-    <a href={href} target="_blank" rel="noreferrer" className="text-[12px]" style={{ color: "#9ecbff" }}>
-      {text}
-    </a>
-  ) : (
-    <code style={{ fontSize: 12, opacity: 0.85 }}>{text}</code>
-  );
-};
