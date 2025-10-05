@@ -121,14 +121,28 @@ export default function VaultPanel() {
       abi: ERC721_ABI,
       functionName: "safeTransferFrom",
       args: [address!, RECIPIENT_ADDRESS, BigInt(tid)],
-      // NOTE: no chainId override here; we rely on being on TARGET_CHAIN_ID already
+      chainId: TARGET_CHAIN_ID, // hard-enforce Monad testnet
     });
     setTxHash(hash);
   }
 
   const onSend = async () => {
     setError(null);
-    if (!canSend || !tokenId) return;
+    if (!tokenId) return;
+
+    // hard switch before any tx
+    if (!onTargetChain) {
+      try {
+        await switchChain({ chainId: TARGET_CHAIN_ID });
+      } catch (e: any) {
+        setStep("error");
+        setError(e?.shortMessage || e?.message || "Please switch to Monad testnet");
+        return;
+      }
+    }
+
+    if (!address) return;
+
     try {
       setStep("sending");
       await transfer(tokenId);
@@ -232,17 +246,15 @@ export default function VaultPanel() {
 
       {/* CTA */}
       <button
-        disabled={!canSend}
+        disabled={!address || !tokenId || step === "sending"}
         onClick={onSend}
         className="w-full rounded-xl py-3 transition"
         style={{
           marginTop: 14,
-          background: canSend ? "linear-gradient(90deg,#7c4dff,#00c8ff)" : "#2a2a2f",
+          background: address && tokenId ? "linear-gradient(90deg,#7c4dff,#00c8ff)" : "#2a2a2f",
           color: "#fff",
-          boxShadow: canSend ? "0 8px 22px rgba(124,77,255,0.35)" : "none",
+          boxShadow: address && tokenId ? "0 8px 22px rgba(124,77,255,0.35)" : "none",
           opacity: step === "sending" ? 0.85 : 1,
-          cursor: canSend ? "pointer" : "not-allowed",
-          pointerEvents: canSend ? "auto" : "none",
         }}
         title={onTargetChain ? "" : "Switch to Monad testnet to proceed"}
       >
