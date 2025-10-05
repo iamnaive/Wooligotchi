@@ -13,21 +13,17 @@ import {
   encodeFunctionData,
   parseAbiItem,
   defineChain,
-  Hex,
+  isHex,
 } from "viem";
 import { emit } from "../utils/domEvents";
 
-/* ================== Constants (Monad testnet) ================== */
-// Allowed ERC-721 collection (only from this contract)
+/* ================ Constants (Monad testnet) ================ */
 const COLLECTION_ADDRESS = "0x88c78d5852f45935324c6d100052958f694e8446" as const;
-// Recipient (vault)
 const RECIPIENT_ADDRESS  = "0xEb9650DDC18FF692f6224EA17f13C351A6108758" as const;
 
-// Target chain / RPC
 const TARGET_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 const RPC_URL = String(import.meta.env.VITE_RPC_URL || "");
 
-// viem chain (our read/sim RPC)
 const MONAD = defineChain({
   id: TARGET_CHAIN_ID,
   name: "Monad Testnet",
@@ -36,35 +32,39 @@ const MONAD = defineChain({
   testnet: true,
 });
 
-// Minimal ERC-721 ABI
-const ERC721_ABI = [
-  parseAbiItem("function safeTransferFrom(address from, address to, uint256 tokenId)"),
-];
-const TRANSFER_EVENT = parseAbiItem(
+/* ================ ABIs ================ */
+// Minimal ERC-721
+const ERC721_TRANSFER = parseAbiItem(
   "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)"
 );
+const ERC721_ABI = [
+  parseAbiItem("function safeTransferFrom(address from, address to, uint256 tokenId)"),
+  parseAbiItem("function balanceOf(address owner) view returns (uint256)"),
+  parseAbiItem("function ownerOf(uint256 tokenId) view returns (address)"),
+  // ERC721Enumerable
+  parseAbiItem("function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)"),
+  // ERC165
+  parseAbiItem("function supportsInterface(bytes4 interfaceId) view returns (bool)"),
+];
 
-/* ================== Helpers ================== */
-// Normalize tokenId entered as decimal or hex
+/* ================ Helpers ================ */
 function normalizeTokenId(raw: string): string | null {
   const s = raw.trim();
   if (!s) return null;
-  if (/^0x[0-9a-fA-F]+$/.test(s)) return s;
+  if (isHex(s)) return s;
   if (/^\d+$/.test(s)) return s.replace(/^0+/, "") || "0";
   return null;
 }
-
-// Friendly errors
 function mapErrorMessage(e: any): string {
   const text = String(e?.shortMessage || e?.message || e || "").toLowerCase();
   if (e?.code === 4001 || text.includes("user rejected")) return "Transaction rejected in wallet.";
   if (text.includes("insufficient funds")) return "Not enough MON to cover gas.";
-  if (text.includes("chain") && text.includes("mismatch")) return "Wrong network. Switch to Monad testnet (10143).";
+  if (text.includes("mismatch") && text.includes("chain")) return "Wrong network. Switch to Monad testnet (10143).";
   if (text.includes("http request failed") || text.includes("network error")) return "Network/RPC error. Check Monad RPC in your wallet.";
+  if (text.includes("too many results") || text.includes("range"))
+    return "RPC range too wide. Try again (the app will scan in smaller windows).";
   return e?.shortMessage || e?.message || "Transfer failed";
 }
-
-// Add Monad with our Alchemy RPC (best-effort)
 async function ensureMonadNetwork(): Promise<void> {
   // @ts-ignore
   const eth = window?.ethereum;
@@ -82,19 +82,16 @@ async function ensureMonadNetwork(): Promise<void> {
   } catch {}
 }
 
-/* ================== Component ================== */
+/* ================ Component ================ */
 export default function VaultPanel() {
   const { address } = useAccount();
   const chainId = useChainId();
   const { switchChain } = useSwitchChain();
-
-  // Wallet client that will sign the tx
   const { data: walletClient } = useWalletClient({
     account: address as `0x${string}` | undefined,
     chainId: TARGET_CHAIN_ID,
   });
 
-  // Our read/sim client (Alchemy RPC)
   const publicClient = useMemo(
     () => createPublicClient({ chain: MONAD, transport: http(RPC_URL) }),
     []
@@ -106,20 +103,15 @@ export default function VaultPanel() {
   const [owned, setOwned] = useState<bigint[]>([]);
   const [finding, setFinding] = useState(false);
 
-  const [step, setStep] = useState<"idle" | "sending" | "sent" | "confirmed" | "error">("idle");
+  const [step, setStep] = useState<"idle"|"sending"|"sent"|"confirmed"|"error">("idle");
   const [error, setError] = useState<string | null>(null);
   const [txHash, setTxHash] = useState<`0x${string}` | null>(null);
-
   const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash });
+
   const onTargetChain = chainId === TARGET_CHAIN_ID;
+  const signer = walletClient?.account?.address as `0x${string}` | undefined;
+  const from = (signer ?? (address as `0x${string}` | undefined)) || null;
 
-  // Pick actual signer address from wallet client
-  function pickFrom(): `0x${string}` | null {
-    const fromClient = walletClient?.account?.address as `0x${string}` | undefined;
-    return fromClient ?? (address as `0x${string}` | undefined) ?? null;
-  }
-
-  // Emit after confirmation
   useEffect(() => {
     if (receipt && step === "sent") {
       setStep("confirmed");
@@ -127,99 +119,131 @@ export default function VaultPanel() {
     }
   }, [receipt, step, tokenId, txHash]);
 
-  // === Auto-discover owned tokenIds by Transfer logs ===
+  // -------- OWNED TOKENS DISCOVERY --------
   useEffect(() => {
     let stop = false;
-    async function fetchOwned() {
+    async function scan() {
       if (!address) { setOwned([]); return; }
       setFinding(true);
       setError(null);
       try {
-        // Get all incoming to "address"
-        const inLogs = await publicClient.getLogs({
-          address: COLLECTION_ADDRESS,
-          event: TRANSFER_EVENT,
-          args: { to: address as `0x${string}` },
-          fromBlock: 0n,
-          toBlock: "latest",
-        });
+        // 1) Try ERC721Enumerable
+        let enumerable = false;
+        try {
+          // ERC721Enumerable interfaceId = 0x780e9d63
+          enumerable = await publicClient.readContract({
+            address: COLLECTION_ADDRESS,
+            abi: ERC721_ABI,
+            functionName: "supportsInterface",
+            args: ["0x780e9d63"],
+          });
+        } catch {}
 
-        // Get all outgoing from "address"
-        const outLogs = await publicClient.getLogs({
-          address: COLLECTION_ADDRESS,
-          event: TRANSFER_EVENT,
-          args: { from: address as `0x${string}` },
-          fromBlock: 0n,
-          toBlock: "latest",
-        });
+        if (enumerable) {
+          const bal = await publicClient.readContract({
+            address: COLLECTION_ADDRESS,
+            abi: ERC721_ABI,
+            functionName: "balanceOf",
+            args: [address],
+          }) as bigint;
 
-        // Build current ownership set = incoming - outgoing by tokenId
-        const inc = new Map<bigint, number>();
-        for (const l of inLogs) {
-          const id = (l.args?.tokenId ?? 0n) as bigint;
-          inc.set(id, (inc.get(id) || 0) + 1);
-        }
-        for (const l of outLogs) {
-          const id = (l.args?.tokenId ?? 0n) as bigint;
-          inc.set(id, (inc.get(id) || 0) - 1);
-        }
-
-        const have = Array.from(inc.entries())
-          .filter(([, c]) => c > 0)
-          .map(([id]) => id)
-          .sort((a, b) => (a < b ? -1 : 1));
-
-        if (!stop) {
-          setOwned(have);
-          // Autofill first token if input is empty or invalid
-          if (have.length && !normalizeTokenId(rawId)) {
-            setRawId(have[0].toString());
+          const maxToFetch = bal > 50n ? 50n : bal; // safety cap for UI
+          const list: bigint[] = [];
+          for (let i = 0n; i < maxToFetch; i++) {
+            try {
+              const id = await publicClient.readContract({
+                address: COLLECTION_ADDRESS,
+                abi: ERC721_ABI,
+                functionName: "tokenOfOwnerByIndex",
+                args: [address, i],
+              }) as bigint;
+              list.push(id);
+            } catch {
+              break; // not enumerable actually
+            }
+          }
+          if (list.length) {
+            if (!stop) {
+              setOwned(list);
+              if (!tokenId) setRawId(list[0].toString());
+              setFinding(false);
+              return;
+            }
           }
         }
+
+        // 2) Fallback: paginated getLogs backward
+        const latest = await publicClient.getBlockNumber();
+        const window = 20_000n;            // blocks per page
+        const maxWindows = 300;            // ~6M blocks cap
+        const found = new Set<bigint>();
+
+        let to = latest;
+        for (let w = 0; w < maxWindows && to > 0n; w++) {
+          const fromBlock = to > window ? to - window + 1n : 0n;
+          try {
+            const logsIn = await publicClient.getLogs({
+              address: COLLECTION_ADDRESS,
+              event: ERC721_TRANSFER,
+              args: { to: address as `0x${string}` },
+              fromBlock,
+              toBlock: to,
+            });
+            const logsOut = await publicClient.getLogs({
+              address: COLLECTION_ADDRESS,
+              event: ERC721_TRANSFER,
+              args: { from: address as `0x${string}` },
+              fromBlock,
+              toBlock: to,
+            });
+
+            for (const l of logsIn) found.add((l.args?.tokenId ?? 0n) as bigint);
+            for (const l of logsOut) found.delete((l.args?.tokenId ?? 0n) as bigint);
+
+            if (found.size && !stop) break; // enough
+          } catch (e: any) {
+            // ignore page errors and continue with smaller window
+          }
+          if (to === 0n) break;
+          to = fromBlock > 0n ? fromBlock - 1n : 0n;
+        }
+
+        const final = Array.from(found).sort((a, b) => (a < b ? -1 : 1));
+        if (!stop) {
+          setOwned(final);
+          if (final.length && !tokenId) setRawId(final[0].toString());
+        }
       } catch (e: any) {
-        if (!stop) setError("Failed to scan owned NFTs (logs). Try again.");
+        if (!stop) setError("Failed to scan owned NFTs. " + (e?.shortMessage || e?.message || ""));
       } finally {
         if (!stop) setFinding(false);
       }
     }
-    fetchOwned();
+    scan();
     return () => { stop = true; };
   }, [address]); // re-scan on wallet change
 
-  // Build tx using our RPC (encode + gas via simulate)
-  const buildTx = async (from: `0x${string}`, tid: string) => {
+  // -------- Build & send tx --------
+  const buildTx = async (sender: `0x${string}`, tid: string) => {
     const data = encodeFunctionData({
       abi: ERC721_ABI,
       functionName: "safeTransferFrom",
-      args: [from, RECIPIENT_ADDRESS, BigInt(tid)],
+      args: [sender, RECIPIENT_ADDRESS, BigInt(tid)],
     });
-
     const sim = await publicClient.simulateContract({
       address: COLLECTION_ADDRESS,
       abi: ERC721_ABI,
       functionName: "safeTransferFrom",
-      args: [from, RECIPIENT_ADDRESS, BigInt(tid)],
-      account: from,
+      args: [sender, RECIPIENT_ADDRESS, BigInt(tid)],
+      account: sender,
     });
-
-    return {
-      to: COLLECTION_ADDRESS as `0x${string}`,
-      data: data as `0x${string}`,
-      gas: sim.request.gas,
-    };
+    return { to: COLLECTION_ADDRESS as `0x${string}`, data: data as `0x${string}`, gas: sim.request.gas };
   };
 
   const onSend = async () => {
     setError(null);
-    const from = pickFrom();
-    if (!from) return;
+    if (!from) { setError("No wallet account."); return; }
     if (!tokenId) { setError("No tokenId selected."); return; }
-
-    // If chosen token is not in discovered list, still allow (manual case)
-    if (owned.length && !owned.some((x) => x === BigInt(tokenId))) {
-      // Gentle warning, but do not block
-      setError("Selected tokenId is not detected on this wallet (continuing anyway).");
-    }
 
     if (!onTargetChain) {
       await ensureMonadNetwork();
@@ -250,8 +274,8 @@ export default function VaultPanel() {
     }
   };
 
-  /* ================== Minimal UI ================== */
-  const canClick = !!pickFrom() && !!tokenId && step !== "sending";
+  /* ================ UI (compact) ================ */
+  const canClick = !!from && !!tokenId && step !== "sending";
 
   return (
     <div
@@ -272,7 +296,6 @@ export default function VaultPanel() {
         </div>
       </div>
 
-      {/* tokenId (auto-filled from owned NFTs) */}
       <div>
         <label className="text-xs opacity-80" style={{ display: "block", marginBottom: 6 }}>
           tokenId {finding ? "(scanning…)" : owned.length ? `(${owned.length} found)` : ""}
@@ -294,31 +317,24 @@ export default function VaultPanel() {
           </span>
         </div>
 
-        {/* quick picker of first few owned ids (if many, keep it small) */}
         {owned.length > 1 && (
           <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap", fontSize: 11, opacity: 0.85 }}>
-            {owned.slice(0, 10).map((id) => (
+            {owned.slice(0, 12).map((id) => (
               <button
                 key={id.toString()}
                 onClick={() => setRawId(id.toString())}
                 className="btn"
-                style={{
-                  background: "#1a1a20",
-                  borderRadius: 10,
-                  padding: "4px 8px",
-                  color: "#ddd",
-                  border: "1px solid #2b2b31",
-                }}
+                style={{ background: "#1a1a20", borderRadius: 10, padding: "4px 8px", color: "#ddd", border: "1px solid #2b2b31" }}
               >
                 #{id.toString()}
               </button>
             ))}
-            {owned.length > 10 && <span style={{ opacity: 0.6 }}>… +{owned.length - 10} more</span>}
+            {owned.length > 12 && <span style={{ opacity: 0.6 }}>… +{owned.length - 12} more</span>}
           </div>
         )}
 
         <div className="muted" style={{ fontSize: 11, opacity: 0.65, marginTop: 6 }}>
-          Auto-detected from the allowed collection → vault on Monad testnet.
+          Auto-detected on the allowed collection → vault (Monad testnet).
         </div>
       </div>
 
@@ -352,7 +368,7 @@ export default function VaultPanel() {
                 Fix network (add Alchemy RPC)
               </button>
               <button
-                onClick={() => { if (address) { setRawId(""); setOwned([]); } }}
+                onClick={() => { setOwned([]); setRawId(""); }}
                 className="btn"
                 style={{ background: "#2a2a2f", borderRadius: 10, padding: "6px 10px", color: "#fff" }}
               >
