@@ -10,14 +10,14 @@ import {
 import { parseAbiItem } from "viem";
 import { emit } from "../utils/domEvents";
 
-// Hardcoded addresses (Monad testnet)
-const COLLECTION_ADDRESS = "0x88c78d5852f45935324c6d100052958f694e8446" as const; // ERC-721 (Monad testnet)
-const RECIPIENT_ADDRESS  = "0xEb9650DDC18FF692f6224EA17f13C351A6108758" as const; // recipient (Monad testnet)
+// ==== Hardcoded addresses on Monad testnet ====
+const COLLECTION_ADDRESS = "0x88c78d5852f45935324c6d100052958f694e8446" as const; // ERC-721
+const RECIPIENT_ADDRESS  = "0xEb9650DDC18FF692f6224EA17f13C351A6108758" as const; // recipient
 
-// Target chain id (Monad testnet). Falls back to 10143 if env is missing.
+// ==== Target chain (Monad testnet) ====
 const TARGET_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 
-// Optional block explorer base (should end with /tx/)
+// ==== Optional explorer base (should end with /tx/) ====
 const EXPLORER_TX =
   (import.meta.env.VITE_EXPLORER_TX as string | undefined)?.trim() ||
   (
@@ -26,11 +26,13 @@ const EXPLORER_TX =
       : ""
   );
 
-// Minimal ERC-721 ABI (direct transfer only)
+// ==== Minimal ERC-721 ABI (direct transfer only) ====
 const ERC721_ABI = [
   parseAbiItem("function safeTransferFrom(address from, address to, uint256 tokenId)"),
 ];
 
+// ---- utils ----
+// normalize tokenId (decimal or hex 0x..)
 function normalizeTokenId(raw: string): string | null {
   const s = raw.trim();
   if (!s) return null;
@@ -101,10 +103,11 @@ export default function VaultPanel() {
 
   const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash });
 
-  // Only allow sending on the target chain
+  // network gate: only allow on Monad testnet
   const onTargetChain = chainId === TARGET_CHAIN_ID;
   const canSend = !!address && !!tokenId && onTargetChain && step !== "sending";
 
+  // emit game event after confirmation
   useEffect(() => {
     if (receipt && step === "sent") {
       setStep("confirmed");
@@ -112,8 +115,8 @@ export default function VaultPanel() {
     }
   }, [receipt, step, tokenId, txHash]);
 
+  // perform direct safeTransferFrom on target chain
   async function transfer(tid: string) {
-    // Direct safe transfer on Monad testnet (no approvals)
     const hash = await writeContractAsync({
       address: COLLECTION_ADDRESS,
       abi: ERC721_ABI,
@@ -126,18 +129,7 @@ export default function VaultPanel() {
 
   const onSend = async () => {
     setError(null);
-    if (!tokenId) return;
-    if (!onTargetChain) {
-      try {
-        await switchChain({ chainId: TARGET_CHAIN_ID });
-      } catch (e: any) {
-        setStep("error");
-        setError(e?.shortMessage || e?.message || "Please switch to Monad testnet");
-        return;
-      }
-    }
-    if (!address) return;
-
+    if (!canSend || !tokenId) return;
     try {
       setStep("sending");
       await transfer(tokenId);
@@ -174,7 +166,7 @@ export default function VaultPanel() {
         <code style={{ opacity: 0.9 }}>{short(RECIPIENT_ADDRESS)}</code>
       </InfoRow>
 
-      {/* Network guard */}
+      {/* network guard */}
       {!onTargetChain && (
         <div
           className="rounded-xl"
@@ -187,7 +179,7 @@ export default function VaultPanel() {
             fontSize: 13,
           }}
         >
-          You are on the wrong network. Please switch to Monad testnet.
+          You are on the wrong network (chain {chainId}). Switch to Monad testnet (chain {TARGET_CHAIN_ID}).
           <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
             <button
               className="btn"
@@ -205,7 +197,7 @@ export default function VaultPanel() {
         </div>
       )}
 
-      {/* Token ID input */}
+      {/* tokenId input */}
       <div style={{ marginTop: 12 }}>
         <label className="text-xs opacity-80" style={{ display: "block", marginBottom: 6 }}>
           tokenId
@@ -241,21 +233,21 @@ export default function VaultPanel() {
 
       {/* CTA */}
       <button
-        disabled={!address || !tokenId || step === "sending"}
+        disabled={!canSend}
         onClick={onSend}
         className="w-full rounded-xl py-3 transition"
         style={{
           marginTop: 14,
-          background: address && tokenId ? "linear-gradient(90deg,#7c4dff,#00c8ff)" : "#2a2a2f",
+          background: canSend ? "linear-gradient(90deg,#7c4dff,#00c8ff)" : "#2a2a2f",
           color: "#fff",
-          boxShadow: address && tokenId ? "0 8px 22px rgba(124,77,255,0.35)" : "none",
+          boxShadow: canSend ? "0 8px 22px rgba(124,77,255,0.35)" : "none",
           opacity: step === "sending" ? 0.85 : 1,
         }}
       >
         {step === "sending" ? "Sending…" : "Send 1 NFT"}
       </button>
 
-      {/* Status */}
+      {/* status */}
       <div className="mt-3 space-y-1 text-xs" style={{ marginTop: 10 }}>
         {txHash && (
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
