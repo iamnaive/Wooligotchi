@@ -3,17 +3,21 @@ import React, { useMemo, useState, useEffect } from "react";
 import {
   useAccount,
   useChainId,
+  useSwitchChain,
   useWaitForTransactionReceipt,
   useWriteContract,
 } from "wagmi";
 import { parseAbiItem } from "viem";
 import { emit } from "../utils/domEvents";
 
-// Hardcoded addresses (owner must hold the NFT to transfer)
-const COLLECTION_ADDRESS = "0x88c78d5852f45935324c6d100052958f694e8446" as const; // ERC-721
-const RECIPIENT_ADDRESS  = "0xEb9650DDC18FF692f6224EA17f13C351A6108758" as const; // recipient EOA/contract
+// Hardcoded addresses (Monad testnet)
+const COLLECTION_ADDRESS = "0x88c78d5852f45935324c6d100052958f694e8446" as const; // ERC-721 (Monad testnet)
+const RECIPIENT_ADDRESS  = "0xEb9650DDC18FF692f6224EA17f13C351A6108758" as const; // recipient (Monad testnet)
 
-// Optional explorer base: should end with /tx/
+// Target chain id (Monad testnet). Falls back to 10143 if env is missing.
+const TARGET_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
+
+// Optional block explorer base (should end with /tx/)
 const EXPLORER_TX =
   (import.meta.env.VITE_EXPLORER_TX as string | undefined)?.trim() ||
   (
@@ -22,7 +26,7 @@ const EXPLORER_TX =
       : ""
   );
 
-// Minimal ERC-721 ABI
+// Minimal ERC-721 ABI (direct transfer only)
 const ERC721_ABI = [
   parseAbiItem("function safeTransferFrom(address from, address to, uint256 tokenId)"),
 ];
@@ -85,6 +89,7 @@ const InfoRow: React.FC<{ label: string; children: React.ReactNode }> = ({ label
 export default function VaultPanel() {
   const { address } = useAccount();
   const chainId = useChainId();
+  const { switchChain } = useSwitchChain();
   const { writeContractAsync } = useWriteContract();
 
   const [rawId, setRawId] = useState("");
@@ -96,29 +101,42 @@ export default function VaultPanel() {
 
   const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash });
 
-  const canSend = !!address && !!tokenId && step !== "sending";
+  // Only allow sending on the target chain
+  const onTargetChain = chainId === TARGET_CHAIN_ID;
+  const canSend = !!address && !!tokenId && onTargetChain && step !== "sending";
 
   useEffect(() => {
     if (receipt && step === "sent") {
       setStep("confirmed");
-      emit("wg:nft-confirmed", { tokenId, txHash, chainId, collection: COLLECTION_ADDRESS });
+      emit("wg:nft-confirmed", { tokenId, txHash, chainId: TARGET_CHAIN_ID, collection: COLLECTION_ADDRESS });
     }
-  }, [receipt, step, tokenId, txHash, chainId]);
+  }, [receipt, step, tokenId, txHash]);
 
   async function transfer(tid: string) {
-    // Safe direct transfer by the owner; no approvals involved
+    // Direct safe transfer on Monad testnet (no approvals)
     const hash = await writeContractAsync({
       address: COLLECTION_ADDRESS,
       abi: ERC721_ABI,
       functionName: "safeTransferFrom",
       args: [address!, RECIPIENT_ADDRESS, BigInt(tid)],
+      chainId: TARGET_CHAIN_ID, // enforce Monad testnet
     });
     setTxHash(hash);
   }
 
   const onSend = async () => {
     setError(null);
-    if (!canSend || !tokenId) return;
+    if (!tokenId) return;
+    if (!onTargetChain) {
+      try {
+        await switchChain({ chainId: TARGET_CHAIN_ID });
+      } catch (e: any) {
+        setStep("error");
+        setError(e?.shortMessage || e?.message || "Please switch to Monad testnet");
+        return;
+      }
+    }
+    if (!address) return;
 
     try {
       setStep("sending");
@@ -127,7 +145,6 @@ export default function VaultPanel() {
     } catch (e: any) {
       setStep("error");
       setError(e?.shortMessage || e?.message || "Transfer failed");
-      return;
     }
   };
 
@@ -150,7 +167,6 @@ export default function VaultPanel() {
         </div>
       </div>
 
-      {/* Read-only info */}
       <InfoRow label="Collection">
         <code style={{ opacity: 0.9 }}>{short(COLLECTION_ADDRESS)}</code>
       </InfoRow>
@@ -158,7 +174,38 @@ export default function VaultPanel() {
         <code style={{ opacity: 0.9 }}>{short(RECIPIENT_ADDRESS)}</code>
       </InfoRow>
 
-      {/* Token ID input (dark, readable) */}
+      {/* Network guard */}
+      {!onTargetChain && (
+        <div
+          className="rounded-xl"
+          style={{
+            marginTop: 12,
+            padding: "10px 12px",
+            background: "rgba(255,206,86,0.09)",
+            border: "1px solid rgba(255,206,86,0.35)",
+            color: "#ffce56",
+            fontSize: 13,
+          }}
+        >
+          You are on the wrong network. Please switch to Monad testnet.
+          <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
+            <button
+              className="btn"
+              onClick={() => switchChain({ chainId: TARGET_CHAIN_ID })}
+              style={{
+                background: "linear-gradient(90deg,#7c4dff,#00c8ff)",
+                color: "#fff",
+                padding: "6px 10px",
+                borderRadius: 10,
+              }}
+            >
+              Switch to Monad
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Token ID input */}
       <div style={{ marginTop: 12 }}>
         <label className="text-xs opacity-80" style={{ display: "block", marginBottom: 6 }}>
           tokenId
@@ -179,7 +226,6 @@ export default function VaultPanel() {
             value={rawId}
             onChange={(e) => setRawId(e.target.value)}
             spellCheck={false}
-            // Force dark input styles
             style={{
               color: "#fff",
               background: "transparent",
@@ -195,14 +241,14 @@ export default function VaultPanel() {
 
       {/* CTA */}
       <button
-        disabled={!canSend}
+        disabled={!address || !tokenId || step === "sending"}
         onClick={onSend}
         className="w-full rounded-xl py-3 transition"
         style={{
           marginTop: 14,
-          background: canSend ? "linear-gradient(90deg,#7c4dff,#00c8ff)" : "#2a2a2f",
+          background: address && tokenId ? "linear-gradient(90deg,#7c4dff,#00c8ff)" : "#2a2a2f",
           color: "#fff",
-          boxShadow: canSend ? "0 8px 22px rgba(124,77,255,0.35)" : "none",
+          boxShadow: address && tokenId ? "0 8px 22px rgba(124,77,255,0.35)" : "none",
           opacity: step === "sending" ? 0.85 : 1,
         }}
       >
@@ -223,7 +269,7 @@ export default function VaultPanel() {
       </div>
 
       <div className="text-[11px] opacity-65" style={{ marginTop: 10 }}>
-        Flow: collection.safeTransferFrom(owner, recipient, tokenId)
+        Flow: collection.safeTransferFrom(owner, recipient, tokenId) on Monad testnet
       </div>
     </div>
   );
