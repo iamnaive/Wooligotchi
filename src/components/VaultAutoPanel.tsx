@@ -1,5 +1,5 @@
 // src/components/VaultAutoPanel.tsx
-// Scans tokenId 0..399 for the given ERC-721 collection and sends owned tokens to the Vault.
+// Scans tokenId 0..399 for the configured ERC-721 and offers "send to Vault" for owned tokens.
 // Comments: English only.
 
 import React from "react";
@@ -12,22 +12,47 @@ import {
 } from "wagmi";
 import { Address, parseAbi } from "viem";
 
+// ===== ENV / Constants =====
 const TARGET_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 const COLLECTION_ADDRESS = String(import.meta.env.VITE_COLLECTION_ADDRESS || "").toLowerCase() as Address;
 const VAULT_ADDRESS      = String(import.meta.env.VITE_VAULT_ADDRESS || "").toLowerCase() as Address;
 
+// Minimal ERC-721 ABI
 const ERC721_ABI = parseAbi([
   "function ownerOf(uint256 tokenId) view returns (address)",
   "function safeTransferFrom(address from, address to, uint256 tokenId) external",
 ]);
 
+function Badge({ children }: { children: React.ReactNode }) {
+  return (
+    <span
+      style={{
+        fontSize: 12,
+        padding: "2px 8px",
+        borderRadius: 8,
+        background: "#1e1f27",
+        border: "1px solid #2a2b33",
+        color: "#bfc3d7",
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+function ErrorText({ text }: { text: string }) {
+  return <div style={{ color: "#ff6b6b", fontSize: 12, marginTop: 6 }}>{text}</div>;
+}
+
 function mapError(e: any): string {
   const t = String(e?.shortMessage || e?.message || e || "").toLowerCase();
   if (e?.code === 4001 || t.includes("user rejected")) return "You rejected the transaction in wallet.";
   if (t.includes("insufficient funds")) return "Not enough MON to pay gas.";
-  if (t.includes("mismatch") || t.includes("wrong network") || t.includes("chain of the wallet")) return "Wrong network. Switch to Monad testnet (10143).";
+  if (t.includes("mismatch") || t.includes("wrong network") || t.includes("chain of the wallet"))
+    return "Wrong network. Switch to Monad testnet (10143).";
   if (t.includes("non erc721receiver")) return "Vault is not ERC721Receiver or address is wrong.";
-  if (t.includes("not token owner") || t.includes("not owner nor approved")) return "You are not the owner of this tokenId.";
+  if (t.includes("not token owner") || t.includes("not owner nor approved"))
+    return "You are not the owner of this tokenId.";
   return e?.shortMessage || e?.message || "Failed.";
 }
 
@@ -61,17 +86,26 @@ export default function VaultAutoPanel() {
 
     for (let from = START; from <= END; from += BATCH) {
       const to = Math.min(from + BATCH - 1, END);
-      const tasks = [];
+      const tasks: Promise<
+        | { id: number; owner: string; ok: true }
+        | { id: number; owner: string; ok: false }
+      >[] = [];
+
       for (let id = from; id <= to; id++) {
         tasks.push(
-          publicClient.readContract({
-            address: COLLECTION_ADDRESS,
-            abi: ERC721_ABI,
-            functionName: "ownerOf",
-            args: [BigInt(id)],
-          })
-          .then((owner) => ({ id, owner: (owner as Address).toLowerCase(), ok: true }))
-          .catch(() => ({ id, owner: "0x0000000000000000000000000000000000000000", ok: false }))
+          publicClient
+            .readContract({
+              address: COLLECTION_ADDRESS,
+              abi: ERC721_ABI,
+              functionName: "ownerOf",
+              args: [BigInt(id)],
+            })
+            .then((owner) => ({ id, owner: (owner as Address).toLowerCase(), ok: true }))
+            .catch(() => ({
+              id,
+              owner: "0x0000000000000000000000000000000000000000",
+              ok: false,
+            }))
         );
       }
 
@@ -81,7 +115,9 @@ export default function VaultAutoPanel() {
           if (r.value.owner === address.toLowerCase()) hits.push(r.value.id);
         }
       }
-      setProgress(Math.round(((Math.min(to, END) - START + 1) / (END - START + 1)) * 100));
+      setProgress(
+        Math.round(((Math.min(to, END) - START + 1) / (END - START + 1)) * 100)
+      );
     }
 
     setOwned(hits);
@@ -92,6 +128,7 @@ export default function VaultAutoPanel() {
     setErr(null);
     setLastTx(null);
     if (!address) { setErr("Connect a wallet first."); return; }
+
     if (chainId !== TARGET_CHAIN_ID) {
       try { await switchChain({ chainId: TARGET_CHAIN_ID }); }
       catch { setErr("Wrong network. Switch to Monad testnet (10143)."); return; }
@@ -106,14 +143,22 @@ export default function VaultAutoPanel() {
         args: [address, VAULT_ADDRESS, BigInt(tokenId)],
         chainId: TARGET_CHAIN_ID,
         account: address,
-        gas: 120_000n, // safer for Monad
+        gas: 120_000n, // explicit gas for Monad
       });
       setLastTx(tx as string);
       setOwned((prev) => prev.filter((x) => x !== tokenId));
       try {
-        window.dispatchEvent(new CustomEvent("wg:nft-confirmed", {
-          detail: { address, collection: COLLECTION_ADDRESS, tokenId, txHash: tx, chainId: TARGET_CHAIN_ID }
-        }));
+        window.dispatchEvent(
+          new CustomEvent("wg:nft-confirmed", {
+            detail: {
+              address,
+              collection: COLLECTION_ADDRESS,
+              tokenId,
+              txHash: tx,
+              chainId: TARGET_CHAIN_ID,
+            },
+          })
+        );
       } catch {}
     } catch (e: any) {
       setErr(mapError(e));
@@ -123,60 +168,107 @@ export default function VaultAutoPanel() {
   }
 
   return (
-    <div style={{ maxWidth: 660, margin: "24px auto", padding: 16, borderRadius: 16, background: "#0f1117", color: "#eaeaf0", border: "1px solid #22252e" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-        <div style={{ fontWeight: 800, fontSize: 18 }}>Vault (Auto-parser 0..399)</div>
-        <div style={{ fontSize: 12, opacity: 0.8 }}>Chain: {chainId ?? "?"} · Target: {TARGET_CHAIN_ID}</div>
-      </div>
-
-      <div style={{ fontSize: 12, opacity: 0.9, marginBottom: 10 }}>
-        Collection: <code>{COLLECTION_ADDRESS || "—"}</code> · Vault: <code>{VAULT_ADDRESS || "—"}</code>
-      </div>
-
-      <button
-        onClick={scanRange}
-        disabled={scanning}
+    <div
+      className="rounded-2xl p-5"
+      style={{
+        background: "linear-gradient(180deg,#0f1117,#0b0d12)",
+        color: "#eaeaf0",
+        border: "1px solid rgba(255,255,255,0.08)",
+        boxShadow: "0 18px 50px rgba(0,0,0,0.55)",
+        maxWidth: 620,
+        margin: "0 auto",
+      }}
+    >
+      <div
         style={{
-          background: scanning ? "#2a2a2f" : "linear-gradient(90deg,#7c4dff,#00c8ff)",
-          color: "#fff",
-          padding: "8px 12px",
-          borderRadius: 10,
-          border: "none",
-          cursor: scanning ? "wait" : "pointer",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginBottom: 6,
         }}
       >
-        {scanning ? `Scanning… ${progress}%` : "Scan owned in 0..399"}
-      </button>
+        <div style={{ fontWeight: 800, fontSize: 18 }}>Vault (Auto-parser 0..399)</div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <Badge>Chain: {chainId ?? "?"}</Badge>
+          <Badge>Target: {TARGET_CHAIN_ID}</Badge>
+        </div>
+      </div>
 
-      {err && <div style={{ color: "#ff6b6b", fontSize: 12, marginTop: 8 }}>{err}</div>}
+      <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 10 }}>
+        Collection: <code style={{ opacity: 0.9 }}>{COLLECTION_ADDRESS || "—"}</code> · Vault:{" "}
+        <code style={{ opacity: 0.9 }}>{VAULT_ADDRESS || "—"}</code>
+      </div>
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          onClick={scanRange}
+          disabled={scanning}
+          className="btn"
+          style={{
+            background: scanning ? "#2a2a2f" : "linear-gradient(90deg,#7c4dff,#00c8ff)",
+            color: "#fff",
+            padding: "8px 12px",
+            borderRadius: 10,
+            cursor: scanning ? "wait" : "pointer",
+          }}
+        >
+          {scanning ? `Scanning… ${progress}%` : "Scan owned in 0..399"}
+        </button>
+      </div>
+
+      {err && <ErrorText text={err} />}
 
       <div style={{ marginTop: 12 }}>
         <div style={{ fontSize: 13, opacity: 0.9, marginBottom: 6 }}>
-          Found owned tokenIds: {owned.length}
+          Found owned tokenIds: {owned.length > 0 ? owned.length : 0}
         </div>
 
+        {owned.length === 0 && !scanning && (
+          <div style={{ fontSize: 12, opacity: 0.75 }}>
+            Nothing found in 0..399 for this wallet. Try minting or use another range.
+          </div>
+        )}
+
         {owned.length > 0 && (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 10 }}>
-            {owned.sort((a, b) => a - b).map((id) => (
-              <div key={id} style={{ background: "#15161c", border: "1px solid #262833", borderRadius: 12, padding: 10 }}>
-                <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 6 }}>#{id}</div>
-                <button
-                  disabled={sending}
-                  onClick={() => sendOne(id)}
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))",
+              gap: 10,
+              marginTop: 6,
+            }}
+          >
+            {owned
+              .sort((a, b) => a - b)
+              .map((id) => (
+                <div
+                  key={id}
+                  className="card"
                   style={{
-                    width: "100%",
-                    background: "linear-gradient(90deg,#7c4dff,#00c8ff)",
-                    color: "#fff",
-                    padding: "6px 10px",
-                    borderRadius: 10,
-                    border: "none",
-                    cursor: sending ? "wait" : "pointer",
+                    background: "#15161c",
+                    border: "1px solid #262833",
+                    borderRadius: 12,
+                    padding: 10,
                   }}
                 >
-                  {sending ? "Sending…" : "Send to Vault"}
-                </button>
-              </div>
-            ))}
+                  <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 6 }}>#{id}</div>
+                  <button
+                    disabled={sending}
+                    onClick={() => sendOne(id)}
+                    className="btn"
+                    style={{
+                      width: "100%",
+                      background: "linear-gradient(90deg,#7c4dff,#00c8ff)",
+                      color: "#fff",
+                      padding: "6px 10px",
+                      borderRadius: 10,
+                      cursor: sending ? "wait" : "pointer",
+                    }}
+                  >
+                    {sending ? "Sending…" : "Send to Vault"}
+                  </button>
+                </div>
+              ))}
           </div>
         )}
 
@@ -187,8 +279,8 @@ export default function VaultAutoPanel() {
         )}
       </div>
 
-      <div style={{ marginTop: 10, fontSize: 11, opacity: 0.65 }}>
-        Notes: Reads use the app RPC; your wallet must be on Monad (10143) to send.
+      <div className="text-[11px] opacity-65" style={{ marginTop: 10 }}>
+        Notes: Reads use your app RPC; wallet network must be Monad (10143) to send.
       </div>
     </div>
   );
