@@ -1,47 +1,26 @@
-// src/components/VaultAutoPanel.tsx
-// Scans tokenId 0..399 for the configured ERC-721 and offers "send to Vault" for owned tokens.
+// src/components/SendByIdPanel.tsx
+// Simple "send by tokenId" flow for ERC-721 -> Vault on Monad Testnet.
+// Uses wagmi writeContract with explicit gas; no pre-scan, no extra checks.
 // Comments: English only.
 
-import React from "react";
-import {
-  useAccount,
-  useChainId,
-  usePublicClient,
-  useWriteContract,
-  useSwitchChain,
-} from "wagmi";
+import React, { useMemo, useState } from "react";
+import { useAccount, useChainId, useSwitchChain, useWriteContract } from "wagmi";
 import { Address, parseAbi } from "viem";
 
-// ===== ENV / Constants =====
 const TARGET_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 const COLLECTION_ADDRESS = String(import.meta.env.VITE_COLLECTION_ADDRESS || "").toLowerCase() as Address;
 const VAULT_ADDRESS      = String(import.meta.env.VITE_VAULT_ADDRESS || "").toLowerCase() as Address;
 
-// Minimal ERC-721 ABI
 const ERC721_ABI = parseAbi([
-  "function ownerOf(uint256 tokenId) view returns (address)",
-  "function safeTransferFrom(address from, address to, uint256 tokenId) external",
+  "function safeTransferFrom(address from, address to, uint256 tokenId) external"
 ]);
 
-function Badge({ children }: { children: React.ReactNode }) {
-  return (
-    <span
-      style={{
-        fontSize: 12,
-        padding: "2px 8px",
-        borderRadius: 8,
-        background: "#1e1f27",
-        border: "1px solid #2a2b33",
-        color: "#bfc3d7",
-      }}
-    >
-      {children}
-    </span>
-  );
-}
-
-function ErrorText({ text }: { text: string }) {
-  return <div style={{ color: "#ff6b6b", fontSize: 12, marginTop: 6 }}>{text}</div>;
+function normalizeTokenId(raw: string): bigint | null {
+  const s = raw.trim();
+  if (!s) return null;
+  if (/^0x[0-9a-fA-F]+$/.test(s)) return BigInt(s);
+  if (/^\d+$/.test(s)) return BigInt(s.replace(/^0+/, "") || "0");
+  return null;
 }
 
 function mapError(e: any): string {
@@ -50,85 +29,33 @@ function mapError(e: any): string {
   if (t.includes("insufficient funds")) return "Not enough MON to pay gas.";
   if (t.includes("mismatch") || t.includes("wrong network") || t.includes("chain of the wallet"))
     return "Wrong network. Switch to Monad testnet (10143).";
-  if (t.includes("non erc721receiver")) return "Vault is not ERC721Receiver or address is wrong.";
+  if (t.includes("non erc721receiver")) return "Vault is not ERC721Receiver or wrong address.";
   if (t.includes("not token owner") || t.includes("not owner nor approved"))
     return "You are not the owner of this tokenId.";
   return e?.shortMessage || e?.message || "Failed.";
 }
 
-export default function VaultAutoPanel() {
+export default function SendByIdPanel() {
   const { address } = useAccount();
   const chainId = useChainId();
-  const publicClient = usePublicClient();
   const { switchChain } = useSwitchChain();
   const { writeContractAsync } = useWriteContract();
 
-  const [scanning, setScanning] = React.useState(false);
-  const [progress, setProgress] = React.useState(0);
-  const [owned, setOwned] = React.useState<number[]>([]);
-  const [err, setErr] = React.useState<string | null>(null);
-  const [sending, setSending] = React.useState(false);
-  const [lastTx, setLastTx] = React.useState<string | null>(null);
+  const [rawId, setRawId] = useState("");
+  const tokenId = useMemo(() => normalizeTokenId(rawId), [rawId]);
 
-  async function scanRange() {
+  const [sending, setSending] = useState(false);
+  const [hash, setHash] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function onSend() {
     setErr(null);
-    setOwned([]);
+    setHash(null);
     if (!address) { setErr("Connect a wallet first."); return; }
-    if (!publicClient) { setErr("Public client not ready."); return; }
-    if (!COLLECTION_ADDRESS) { setErr("VITE_COLLECTION_ADDRESS is empty."); return; }
+    if (!COLLECTION_ADDRESS || !VAULT_ADDRESS) { setErr("Env addresses are not set."); return; }
+    if (tokenId === null) { setErr("Invalid tokenId."); return; }
 
-    setScanning(true);
-    setProgress(0);
-
-    const START = 0, END = 399;
-    const BATCH = 40;
-    const hits: number[] = [];
-
-    for (let from = START; from <= END; from += BATCH) {
-      const to = Math.min(from + BATCH - 1, END);
-      const tasks: Promise<
-        | { id: number; owner: string; ok: true }
-        | { id: number; owner: string; ok: false }
-      >[] = [];
-
-      for (let id = from; id <= to; id++) {
-        tasks.push(
-          publicClient
-            .readContract({
-              address: COLLECTION_ADDRESS,
-              abi: ERC721_ABI,
-              functionName: "ownerOf",
-              args: [BigInt(id)],
-            })
-            .then((owner) => ({ id, owner: (owner as Address).toLowerCase(), ok: true }))
-            .catch(() => ({
-              id,
-              owner: "0x0000000000000000000000000000000000000000",
-              ok: false,
-            }))
-        );
-      }
-
-      const res = await Promise.allSettled(tasks);
-      for (const r of res) {
-        if (r.status === "fulfilled" && r.value.ok) {
-          if (r.value.owner === address.toLowerCase()) hits.push(r.value.id);
-        }
-      }
-      setProgress(
-        Math.round(((Math.min(to, END) - START + 1) / (END - START + 1)) * 100)
-      );
-    }
-
-    setOwned(hits);
-    setScanning(false);
-  }
-
-  async function sendOne(tokenId: number) {
-    setErr(null);
-    setLastTx(null);
-    if (!address) { setErr("Connect a wallet first."); return; }
-
+    // Force wallet to target chain
     if (chainId !== TARGET_CHAIN_ID) {
       try { await switchChain({ chainId: TARGET_CHAIN_ID }); }
       catch { setErr("Wrong network. Switch to Monad testnet (10143)."); return; }
@@ -140,23 +67,18 @@ export default function VaultAutoPanel() {
         address: COLLECTION_ADDRESS,
         abi: ERC721_ABI,
         functionName: "safeTransferFrom",
-        args: [address, VAULT_ADDRESS, BigInt(tokenId)],
+        args: [address, VAULT_ADDRESS, tokenId],
         chainId: TARGET_CHAIN_ID,
         account: address,
         gas: 120_000n, // explicit gas for Monad
       });
-      setLastTx(tx as string);
-      setOwned((prev) => prev.filter((x) => x !== tokenId));
+      setHash(tx as string);
+
+      // Fire app-level event so your game grants a life (optional)
       try {
         window.dispatchEvent(
           new CustomEvent("wg:nft-confirmed", {
-            detail: {
-              address,
-              collection: COLLECTION_ADDRESS,
-              tokenId,
-              txHash: tx,
-              chainId: TARGET_CHAIN_ID,
-            },
+            detail: { address, collection: COLLECTION_ADDRESS, tokenId: Number(tokenId), txHash: tx, chainId: TARGET_CHAIN_ID }
           })
         );
       } catch {}
@@ -175,113 +97,64 @@ export default function VaultAutoPanel() {
         color: "#eaeaf0",
         border: "1px solid rgba(255,255,255,0.08)",
         boxShadow: "0 18px 50px rgba(0,0,0,0.55)",
-        maxWidth: 620,
+        maxWidth: 520,
         margin: "0 auto",
       }}
     >
-      <div
+      <div style={{ textAlign: "center", marginBottom: 10 }}>
+        <div style={{ fontWeight: 800, fontSize: 18 }}>Send NFT by ID</div>
+        <div style={{ fontSize: 13, opacity: 0.85, marginTop: 2 }}>
+          Collection → Vault on Monad Testnet (10143)
+        </div>
+      </div>
+
+      <div>
+        <label className="text-xs opacity-80" style={{ display: "block", marginBottom: 6 }}>
+          tokenId
+        </label>
+        <div className="flex items-center rounded-xl px-3 py-2" style={{ background: "#17171c", border: "1px solid #2b2b31" }}>
+          <div className="text-xs mr-2 px-2 py-1 rounded-lg" style={{ background: "#222228", border: "1px solid #32323a", color: "#ddd" }}>
+            #ID
+          </div>
+          <input
+            className="flex-1 outline-none text-sm"
+            placeholder="e.g. 1186 or 0x4a2"
+            value={rawId}
+            onChange={(e) => setRawId(e.target.value)}
+            spellCheck={false}
+            style={{ color: "#fff", background: "transparent", border: 0, caretColor: "#fff" }}
+          />
+          <span className="text-[11px] ml-2" style={{ opacity: 0.75, color: tokenId !== null ? "#9fe29f" : "#ff9e9e" }}>
+            {tokenId !== null ? "ok" : "invalid"}
+          </span>
+        </div>
+        <div className="muted" style={{ fontSize: 11, opacity: 0.65, marginTop: 6 }}>
+          Make sure your wallet is on Monad Testnet before sending.
+        </div>
+      </div>
+
+      <button
+        disabled={!address || tokenId === null || sending}
+        onClick={onSend}
+        className="w-full rounded-xl py-3 transition"
         style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 6,
+          marginTop: 12,
+          background: !address || tokenId === null || sending ? "#2a2a2f" : "linear-gradient(90deg,#7c4dff,#00c8ff)",
+          color: "#fff",
+          boxShadow: !address || tokenId === null || sending ? "none" : "0 8px 22px rgba(124,77,255,0.35)",
+          opacity: sending ? 0.85 : 1,
+          cursor: !address || tokenId === null || sending ? "not-allowed" : "pointer",
         }}
       >
-        <div style={{ fontWeight: 800, fontSize: 18 }}>Vault (Auto-parser 0..399)</div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <Badge>Chain: {chainId ?? "?"}</Badge>
-          <Badge>Target: {TARGET_CHAIN_ID}</Badge>
+        {sending ? "Sending…" : "Send to Vault"}
+      </button>
+
+      {hash && (
+        <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>
+          Tx: <code>{hash.slice(0, 12)}…{hash.slice(-10)}</code>
         </div>
-      </div>
-
-      <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 10 }}>
-        Collection: <code style={{ opacity: 0.9 }}>{COLLECTION_ADDRESS || "—"}</code> · Vault:{" "}
-        <code style={{ opacity: 0.9 }}>{VAULT_ADDRESS || "—"}</code>
-      </div>
-
-      <div style={{ display: "flex", gap: 8 }}>
-        <button
-          onClick={scanRange}
-          disabled={scanning}
-          className="btn"
-          style={{
-            background: scanning ? "#2a2a2f" : "linear-gradient(90deg,#7c4dff,#00c8ff)",
-            color: "#fff",
-            padding: "8px 12px",
-            borderRadius: 10,
-            cursor: scanning ? "wait" : "pointer",
-          }}
-        >
-          {scanning ? `Scanning… ${progress}%` : "Scan owned in 0..399"}
-        </button>
-      </div>
-
-      {err && <ErrorText text={err} />}
-
-      <div style={{ marginTop: 12 }}>
-        <div style={{ fontSize: 13, opacity: 0.9, marginBottom: 6 }}>
-          Found owned tokenIds: {owned.length > 0 ? owned.length : 0}
-        </div>
-
-        {owned.length === 0 && !scanning && (
-          <div style={{ fontSize: 12, opacity: 0.75 }}>
-            Nothing found in 0..399 for this wallet. Try minting or use another range.
-          </div>
-        )}
-
-        {owned.length > 0 && (
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))",
-              gap: 10,
-              marginTop: 6,
-            }}
-          >
-            {owned
-              .sort((a, b) => a - b)
-              .map((id) => (
-                <div
-                  key={id}
-                  className="card"
-                  style={{
-                    background: "#15161c",
-                    border: "1px solid #262833",
-                    borderRadius: 12,
-                    padding: 10,
-                  }}
-                >
-                  <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 6 }}>#{id}</div>
-                  <button
-                    disabled={sending}
-                    onClick={() => sendOne(id)}
-                    className="btn"
-                    style={{
-                      width: "100%",
-                      background: "linear-gradient(90deg,#7c4dff,#00c8ff)",
-                      color: "#fff",
-                      padding: "6px 10px",
-                      borderRadius: 10,
-                      cursor: sending ? "wait" : "pointer",
-                    }}
-                  >
-                    {sending ? "Sending…" : "Send to Vault"}
-                  </button>
-                </div>
-              ))}
-          </div>
-        )}
-
-        {lastTx && (
-          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>
-            Tx: <code>{lastTx.slice(0, 12)}…{lastTx.slice(-10)}</code>
-          </div>
-        )}
-      </div>
-
-      <div className="text-[11px] opacity-65" style={{ marginTop: 10 }}>
-        Notes: Reads use your app RPC; wallet network must be Monad (10143) to send.
-      </div>
+      )}
+      {err && <div style={{ color: "#ff6b6b", fontSize: 12, marginTop: 6 }}>{err}</div>}
     </div>
   );
 }
