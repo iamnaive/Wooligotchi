@@ -1,3 +1,4 @@
+// src/App.tsx
 import React, { useMemo, useState, useEffect } from "react";
 import {
   http,
@@ -11,28 +12,33 @@ import {
   useSwitchChain,
 } from "wagmi";
 import { injected, walletConnect, coinbaseWallet } from "wagmi/connectors";
-import { defineChain } from "viem";
+import { defineChain, Address } from "viem";
+
 import VaultPanel from "./components/VaultPanel";
 import Tamagotchi from "./components/Tamagotchi";
 import { GameProvider } from "./game/useGame";
 import { AnimSet, FormKey, catalog } from "./game/catalog";
 import "./styles.css";
 
-/* ===== ENV ===== */
+/* ================== ENV ================== */
 const MONAD_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
 const RPC_URL = String(import.meta.env.VITE_RPC_URL ?? "https://testnet-rpc.monad.xyz");
+const RPC_WSS = String(import.meta.env.VITE_RPC_WSS ?? "wss://testnet-rpc.monad.xyz/ws");
 const WC_ID = String(import.meta.env.VITE_WALLETCONNECT_PROJECT_ID ?? "");
+const APP_URL =
+  typeof window !== "undefined" ? window.location.origin : "https://example.com";
 
-/* ===== CHAIN ===== */
-const MONAD = defineChain({
+/* ================== CHAIN ================== */
+export const MONAD = defineChain({
   id: MONAD_CHAIN_ID,
   name: "Monad Testnet",
   nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
-  rpcUrls: { default: { http: [RPC_URL] } },
+  rpcUrls: { default: { http: [RPC_URL], webSocket: [RPC_WSS] } },
+  blockExplorers: { default: { name: "Monad Explorer", url: "https://testnet.monadexplorer.com" } },
   testnet: true,
 });
 
-/* ===== CONNECTORS ===== */
+/* ================== CONNECTORS ================== */
 const connectorsList = [
   injected({ shimDisconnect: true }),
   WC_ID
@@ -52,23 +58,79 @@ const connectorsList = [
         metadata: {
           name: "Wooligotchi",
           description: "Tamagotchi mini-app on Monad",
-          url: typeof window !== "undefined" ? window.location.origin : "https://example.com",
-          icons: ["https://raw.githubusercontent.com/twitter/twemoji/master/assets/svg/1f423.svg"],
+          url: APP_URL,
+          icons: [
+            "https://raw.githubusercontent.com/twitter/twemoji/master/assets/svg/1f423.svg",
+          ],
         },
       })
     : null,
   coinbaseWallet({ appName: "Wooligotchi" }),
 ].filter(Boolean);
 
-/* ===== WAGMI CONFIG ===== */
-const config = createConfig({
+/* ================== WAGMI CONFIG ================== */
+export const config = createConfig({
   chains: [MONAD],
-  connectors: connectorsList as any,
   transports: { [MONAD.id]: http(RPC_URL) },
+  connectors: connectorsList as any,
   ssr: false,
 });
 
-/* ===== Lives (1 NFT = 1 life) ===== */
+/* ================== FORCE SWITCH (Phantom-safe) ================== */
+/** Tries wallet_switchEthereumChain; if unknown chain, adds via wallet_addEthereumChain. */
+async function forceSwitchMonad(rpcHttp: string, explorerUrl: string) {
+  const candidates = [
+    (window as any).ethereum,
+    (window as any).phantom?.ethereum,
+    (window as any).okxwallet?.ethereum,
+  ].filter(Boolean);
+
+  if (!candidates.length) throw new Error("No EVM provider found");
+
+  const hexId = "0x279f"; // 10143
+  let lastErr: any = null;
+
+  for (const provider of candidates) {
+    try {
+      await provider.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: hexId }],
+      });
+      return;
+    } catch (err: any) {
+      // If chain is unknown (4902), try to add it and switch again
+      if (err?.code === 4902 || String(err?.message || "").toLowerCase().includes("unrecognized")) {
+        try {
+          await provider.request({
+            method: "wallet_addEthereumChain",
+            params: [
+              {
+                chainId: hexId,
+                chainName: "Monad Testnet",
+                nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
+                rpcUrls: [rpcHttp],
+                blockExplorerUrls: [explorerUrl],
+              },
+            ],
+          });
+          await provider.request({
+            method: "wallet_switchEthereumChain",
+            params: [{ chainId: hexId }],
+          });
+          return;
+        } catch (e) {
+          lastErr = e;
+          continue;
+        }
+      }
+      lastErr = err;
+      continue;
+    }
+  }
+  throw lastErr ?? new Error("Unable to switch to Monad Testnet");
+}
+
+/* ================== Lives (1 NFT = 1 life) ================== */
 const LIVES_KEY = "wg_lives_v1";
 const lKey = (cid: number, addr: string) => `${cid}:${addr.toLowerCase()}`;
 
@@ -82,6 +144,7 @@ function getLivesLocal(cid: number, addr?: `0x${string}` | null) {
     return 0;
   }
 }
+
 function spendOneLife(chainId: number | undefined, address?: `0x${string}` | null) {
   const cid = chainId ?? MONAD_CHAIN_ID;
   if (!address) return;
@@ -99,6 +162,7 @@ function spendOneLife(chainId: number | undefined, address?: `0x${string}` | nul
     console.error("spendOneLife failed", e);
   }
 }
+
 function grantLives(chainId: number | undefined, address?: `0x${string}` | null, count = 1) {
   const cid = chainId ?? MONAD_CHAIN_ID;
   if (!address || count <= 0) return;
@@ -114,13 +178,13 @@ function grantLives(chainId: number | undefined, address?: `0x${string}` | null,
   }
 }
 
-/* ===== PetConfig ===== */
+/* ================== PetConfig ================== */
 type PetConfig = { name: string; fps?: number; anims: AnimSet };
 function makeConfigFromForm(form: FormKey): PetConfig {
   return { name: "Tamagotchi", fps: 8, anims: catalog[form] };
 }
 
-/* ===== Evolution placeholders ===== */
+/* ================== Evolution state ================== */
 const FORM_KEY_STORAGE = "wg_form_v1";
 function loadForm(): FormKey {
   return (localStorage.getItem(FORM_KEY_STORAGE) as FormKey) || "egg";
@@ -129,27 +193,32 @@ function saveForm(f: FormKey) {
   localStorage.setItem(FORM_KEY_STORAGE, f);
 }
 
-/* ===== MAIN APP ===== */
+/* ================== MAIN APP ================== */
 function AppInner() {
   const { address, isConnected, status } = useAccount();
   const chainId = useChainId();
   const { connect, connectors, status: connectStatus } = useConnect();
   const { disconnect } = useDisconnect();
   const { switchChain } = useSwitchChain();
-  const { data: balance } = useBalance({ address, chainId, query: { enabled: !!address } });
+  const { data: balance } = useBalance({
+    address,
+    chainId,
+    query: { enabled: !!address },
+  });
+
   const [pickerOpen, setPickerOpen] = useState(false);
   const [vaultModal, setVaultModal] = useState(false);
+  const [forceGame, setForceGame] = useState(false);
 
   const lives = useLivesGate(chainId, address);
 
-  // держим игру смонтированной после смерти, чтобы показать оверлей
-  const [forceGame, setForceGame] = useState(false);
+  // Global events
   useEffect(() => {
     const onDead = () => setForceGame(true);
     const onNew = () => setForceGame(false);
     const onRequestNft = () => setVaultModal(true);
     const onConfirmed = (e: any) => {
-      const from = (e?.detail?.address as `0x${string}` | undefined) || address;
+      const from = (e?.detail?.address as `0x${string}` | undefined) || address || undefined;
       grantLives(chainId, from, 1);
       setVaultModal(false);
     };
@@ -167,7 +236,9 @@ function AppInner() {
 
   // Form state
   const [form, setForm] = useState<FormKey>(() => loadForm());
-  useEffect(() => { saveForm(form); }, [form]);
+  useEffect(() => {
+    saveForm(form);
+  }, [form]);
   const petConfig = useMemo(() => makeConfigFromForm(form), [form]);
 
   const walletItems = useMemo(
@@ -179,15 +250,16 @@ function AppInner() {
     [connectors]
   );
 
+  // Connect flow with enforced chain switch
   const pickWallet = async (connectorId: string) => {
     try {
       const c = connectors.find((x) => x.id === connectorId);
       if (!c) return;
+
       if (c.id === "injected") {
         const hasProvider =
           typeof window !== "undefined" &&
-          // @ts-ignore
-          (window.ethereum ||
+          ((window as any).ethereum ||
             (window as any).coinbaseWalletExtension ||
             (window as any).phantom?.ethereum);
         if (!hasProvider) {
@@ -195,10 +267,21 @@ function AppInner() {
           return;
         }
       }
+
       await connect({ connector: c });
+
+      // Try wagmi switch first
       try {
         await switchChain({ chainId: MONAD_CHAIN_ID });
-      } catch {}
+      } catch {
+        // Fallback: raw EIP-3085/3326 for Phantom/OKX/etc.
+        try {
+          await forceSwitchMonad(RPC_URL, "https://testnet.monadexplorer.com");
+        } catch (e) {
+          console.warn("forceSwitchMonad failed:", e);
+        }
+      }
+
       setPickerOpen(false);
     } catch (e: any) {
       console.error(e);
@@ -206,13 +289,16 @@ function AppInner() {
     }
   };
 
-  const evolve = React.useCallback((next?: FormKey) => {
-    const n = next ?? form;
-    setForm(n);
-    return n;
-  }, [form]);
+  const evolve = React.useCallback(
+    (next?: FormKey) => {
+      const n = next ?? form;
+      setForm(n);
+      return n;
+    },
+    [form]
+  );
 
-  // Gate:
+  // Gate: splash / locked / game
   const gate: "splash" | "locked" | "game" =
     !isConnected ? "splash" : lives <= 0 && !forceGame ? "locked" : "game";
 
@@ -296,10 +382,15 @@ function AppInner() {
       {/* Wallet picker */}
       {pickerOpen && !isConnected && (
         <div onClick={() => setPickerOpen(false)} className="modal">
-          <div onClick={(e) => e.stopPropagation()} className="card" style={{ width: 460, maxWidth: "92vw" }}>
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="card"
+            style={{ width: 460, maxWidth: "92vw" }}
+          >
             <div className="title" style={{ fontSize: 20, marginBottom: 10, color: "white" }}>
               Connect a wallet
             </div>
+
             <div className="wallet-grid">
               {connectors.map((c) => (
                 <button
@@ -313,9 +404,11 @@ function AppInner() {
                 </button>
               ))}
             </div>
+
             <div className="helper" style={{ marginTop: 10 }}>
               WalletConnect opens a QR for mobile wallets (Phantom, Rainbow, OKX, etc.).
             </div>
+
             <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
               <button onClick={() => setPickerOpen(false)} className="btn">
                 Close
@@ -325,14 +418,22 @@ function AppInner() {
         </div>
       )}
 
-      {/* Vault CTA modal (открывается по wg:request-nft из оверлея смерти) */}
+      {/* Vault CTA modal (opened by wg:request-nft from the death overlay) */}
       {vaultModal && (
         <div className="modal" onClick={() => setVaultModal(false)}>
-          <div className="card" style={{ width: 520, maxWidth: "92vw" }} onClick={(e)=>e.stopPropagation()}>
-            <div className="title" style={{ fontSize: 18, marginBottom: 8 }}>1 NFT → +1 life</div>
+          <div
+            className="card"
+            style={{ width: 520, maxWidth: "92vw" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="title" style={{ fontSize: 18, marginBottom: 8 }}>
+              1 NFT → +1 life
+            </div>
             <VaultPanel />
             <div style={{ marginTop: 10, display: "flex", justifyContent: "flex-end" }}>
-              <button className="btn" onClick={()=>setVaultModal(false)}>Close</button>
+              <button className="btn" onClick={() => setVaultModal(false)}>
+                Close
+              </button>
             </div>
           </div>
         </div>
@@ -341,17 +442,20 @@ function AppInner() {
   );
 }
 
-/* ===== lives hook ===== */
+/* ================== Lives hook ================== */
 function useLivesGate(chainId: number | undefined, address?: `0x${string}` | null) {
   const [lives, setLives] = React.useState(0);
+
   React.useEffect(() => {
     const cid = chainId ?? MONAD_CHAIN_ID;
     const read = () => setLives(getLivesLocal(cid, address));
     read();
+
     const onStorage = (e: StorageEvent) => {
       if (e.key === LIVES_KEY) read();
     };
     const onCustom = () => read();
+
     window.addEventListener("storage", onStorage);
     window.addEventListener("wg:lives-changed", onCustom as any);
     return () => {
@@ -359,6 +463,7 @@ function useLivesGate(chainId: number | undefined, address?: `0x${string}` | nul
       window.removeEventListener("wg:lives-changed", onCustom as any);
     };
   }, [chainId, address]);
+
   return lives;
 }
 
