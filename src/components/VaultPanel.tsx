@@ -10,11 +10,12 @@ import {
 } from "wagmi";
 import { defineChain, parseAbi, Address } from "viem";
 
-// ===== Env / Constants =====
+// ===== Monad chain / ENV =====
 const TARGET_CHAIN_ID = Number(import.meta.env.VITE_CHAIN_ID ?? 10143);
-const RPC_URL = String(import.meta.env.VITE_RPC_URL || "https://testnet-rpc.monad.xyz");
+const RPC_HTTP = String(import.meta.env.VITE_RPC_URL || "https://testnet-rpc.monad.xyz");
+const RPC_WSS = String(import.meta.env.VITE_RPC_WSS || "wss://testnet-rpc.monad.xyz/ws");
+const EXPLORER = "https://testnet.monadexplorer.com/";
 
-// Read addresses from ENV to avoid drift with hardcodes
 const COLLECTION_ADDRESS = String(import.meta.env.VITE_COLLECTION_ADDRESS || "").toLowerCase() as Address;
 const RECIPIENT_ADDRESS  = String(import.meta.env.VITE_VAULT_ADDRESS || "").toLowerCase() as Address;
 
@@ -22,18 +23,18 @@ const MONAD = defineChain({
   id: TARGET_CHAIN_ID,
   name: "Monad Testnet",
   nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
-  rpcUrls: { default: { http: [RPC_URL] } },
+  rpcUrls: { default: { http: [RPC_HTTP], webSocket: [RPC_WSS] } },
+  blockExplorers: { default: { name: "Monad Explorer", url: EXPLORER } },
   testnet: true,
 });
 
-// Minimal ABI we need
+// ===== Minimal ERC721 =====
 const ERC721_ABI = parseAbi([
   "function ownerOf(uint256) view returns (address)",
   "function safeTransferFrom(address from, address to, uint256 tokenId) external",
-  "function isApprovedForAll(address owner, address operator) view returns (bool)",
-  "function getApproved(uint256 tokenId) view returns (address)",
 ]);
 
+// ===== Utils =====
 function normalizeTokenId(raw: string): bigint | null {
   const s = raw.trim();
   if (!s) return null;
@@ -46,11 +47,48 @@ function mapError(e: any): string {
   const t = String(e?.shortMessage || e?.message || e || "").toLowerCase();
   if (e?.code === 4001 || t.includes("user rejected")) return "You rejected the transaction in wallet.";
   if (t.includes("insufficient funds")) return "Not enough MON to pay gas.";
-  if (t.includes("chain") && t.includes("mismatch")) return "Wrong network. Switch to Monad testnet (10143).";
-  if (t.includes("network") || t.includes("http request failed") || t.includes("socket")) return "Network/RPC error. Check Monad RPC in your wallet.";
-  if (t.includes("caller is not token owner") || t.includes("not token owner") || t.includes("not owner nor approved")) return "You are not the owner or not approved for this tokenId.";
-  if (t.includes("transfer to non erc721receiver implementer")) return "Vault is not an ERC721Receiver or address is wrong.";
+  if (t.includes("mismatch") || t.includes("wrong network") || t.includes("chain of the wallet")) return "Wrong network. Switch to Monad testnet (10143).";
+  if (t.includes("network") || t.includes("http request failed") || t.includes("socket")) return "Network/RPC error. Check your wallet RPC.";
+  if (t.includes("not token owner") || t.includes("not owner nor approved")) return "You are not the owner of this tokenId.";
+  if (t.includes("non erc721receiver")) return "Vault is not ERC721Receiver or address is wrong.";
   return e?.shortMessage || e?.message || "Transfer failed.";
+}
+
+// ===== Hard switch helpers for Phantom (EIP-3085/3326) =====
+async function forceSwitchMonad() {
+  const provider = (window as any).ethereum;
+  if (!provider?.request) throw new Error("No EVM provider found");
+
+  const hexId = "0x279f"; // 10143
+  try {
+    // Try simple switch first
+    await provider.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: hexId }],
+    });
+    return;
+  } catch (err: any) {
+    // If chain is unknown (4902) — add it
+    if (err?.code === 4902 || String(err?.message || "").toLowerCase().includes("unrecognized chain id")) {
+      await provider.request({
+        method: "wallet_addEthereumChain",
+        params: [{
+          chainId: hexId,
+          chainName: "Monad Testnet",
+          nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
+          rpcUrls: [RPC_HTTP],
+          blockExplorerUrls: [EXPLORER],
+        }],
+      });
+      // After add, try switching again
+      await provider.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: hexId }],
+      });
+      return;
+    }
+    throw err;
+  }
 }
 
 export default function VaultPanel() {
@@ -65,12 +103,13 @@ export default function VaultPanel() {
   const tokenId = useMemo(() => normalizeTokenId(rawId), [rawId]);
 
   const [hash, setHash] = useState<`0x${string}` | null>(null);
-  const [step, setStep] = useState<"idle" | "checking" | "sending" | "sent" | "confirmed" | "error">("idle");
+  const [step, setStep] = useState<"idle" | "checking" | "switching" | "sending" | "sent" | "confirmed" | "error">("idle");
   const [err, setErr] = useState<string | null>(null);
 
   const { data: receipt } = useWaitForTransactionReceipt({ hash });
+
   const onTarget = chainId === TARGET_CHAIN_ID;
-  const canSend = !!address && tokenId !== null && onTarget && step !== "sending" && step !== "checking";
+  const canSend = !!address && tokenId !== null && step !== "sending" && step !== "checking" && step !== "switching";
 
   useEffect(() => {
     if (pendingHash && !hash) setHash(pendingHash as `0x${string}`);
@@ -79,7 +118,6 @@ export default function VaultPanel() {
   useEffect(() => {
     if (receipt && step === "sent") {
       setStep("confirmed");
-      // Dispatch custom DOM event for your app
       try {
         const detail = {
           tokenId: tokenId?.toString(),
@@ -92,10 +130,8 @@ export default function VaultPanel() {
     }
   }, [receipt, step, tokenId, hash]);
 
-  async function preflightChecks(owner: Address, id: bigint) {
-    // 1) Ensure addresses present
+  async function preflight(owner: Address, id: bigint) {
     if (!COLLECTION_ADDRESS || !RECIPIENT_ADDRESS) throw new Error("Env addresses are not set.");
-    // 2) Check ownerOf
     const currentOwner = (await publicClient!.readContract({
       address: COLLECTION_ADDRESS,
       abi: ERC721_ABI,
@@ -105,26 +141,42 @@ export default function VaultPanel() {
     if (currentOwner.toLowerCase() !== owner.toLowerCase()) {
       throw new Error("You are not the owner of this tokenId.");
     }
-    // 3) Optional approvals info (not strictly required for owner → vault transfer)
-    //    Many wallets still require no extra approval because sender is the owner.
-    // 4) Simulate to surface reverts early
+    // Dry-run to surface reverts early
     await publicClient!.simulateContract({
       address: COLLECTION_ADDRESS,
       abi: ERC721_ABI,
       functionName: "safeTransferFrom",
       args: [owner, RECIPIENT_ADDRESS, id],
       account: owner,
+      chain: MONAD,
     });
   }
 
   async function onSend() {
     setErr(null);
     if (!address || tokenId === null) return;
-    if (!onTarget) return;
+
+    // Ensure wallet is actually on Monad
+    if (!onTarget) {
+      try {
+        setStep("switching");
+        // Try wagmi first (some wallets support it)
+        try {
+          await switchChain({ chainId: TARGET_CHAIN_ID });
+        } catch {
+          // Fallback to raw EIP-3085 flow (Phantom often needs this)
+          await forceSwitchMonad();
+        }
+      } catch (e: any) {
+        setStep("error");
+        setErr("Unable to switch to Monad Testnet. Open your wallet and switch network manually.");
+        return;
+      }
+    }
 
     try {
       setStep("checking");
-      await preflightChecks(address as Address, tokenId);
+      await preflight(address as Address, tokenId);
 
       setStep("sending");
       const tx = await writeContractAsync({
@@ -134,8 +186,7 @@ export default function VaultPanel() {
         args: [address, RECIPIENT_ADDRESS, tokenId],
         chainId: TARGET_CHAIN_ID,
         account: address,
-        // Monad: set explicit gas to avoid gas_limit overcharge issues
-        gas: 120_000n,
+        gas: 120_000n, // explicit gas = safer on Monad
       });
       setHash(tx as `0x${string}`);
       setStep("sent");
@@ -190,7 +241,7 @@ export default function VaultPanel() {
         </div>
       </div>
 
-      {!onTarget && (
+      {chainId !== TARGET_CHAIN_ID && (
         <div
           style={{
             marginTop: 12,
@@ -203,13 +254,18 @@ export default function VaultPanel() {
           }}
         >
           Wrong network (chain {chainId ?? "?"}). Switch to Monad testnet (chain {TARGET_CHAIN_ID}).
-          <div style={{ marginTop: 8 }}>
+          <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
             <button
-              className="btn"
               onClick={() => switchChain({ chainId: TARGET_CHAIN_ID })}
               style={{ background: "linear-gradient(90deg,#7c4dff,#00c8ff)", color: "#fff", padding: "6px 10px", borderRadius: 10 }}
             >
-              Switch to Monad
+              Switch via wagmi
+            </button>
+            <button
+              onClick={async () => { try { await forceSwitchMonad(); } catch (e) {} }}
+              style={{ background: "#2b2b31", color: "#fff", padding: "6px 10px", borderRadius: 10, border: "1px solid #3a3a41" }}
+            >
+              Force switch to Monad
             </button>
           </div>
         </div>
@@ -224,11 +280,11 @@ export default function VaultPanel() {
           background: canSend ? "linear-gradient(90deg,#7c4dff,#00c8ff)" : "#2a2a2f",
           color: "#fff",
           boxShadow: canSend ? "0 8px 22px rgba(124,77,255,0.35)" : "none",
-          opacity: step === "sending" || step === "checking" ? 0.85 : 1,
+          opacity: step === "sending" || step === "checking" || step === "switching" ? 0.85 : 1,
           cursor: canSend ? "pointer" : "not-allowed",
         }}
       >
-        {step === "checking" ? "Checking…" : step === "sending" ? "Sending…" : "Send 1 NFT"}
+        {step === "switching" ? "Switching…" : step === "checking" ? "Checking…" : step === "sending" ? "Sending…" : "Send 1 NFT"}
       </button>
 
       <div style={{ marginTop: 10, fontSize: 12 }}>
